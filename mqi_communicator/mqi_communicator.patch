@@ -1,0 +1,3826 @@
+diff --git a/mqi_communicator/.pre-commit-config.yaml b/mqi_communicator/.pre-commit-config.yaml
+new file mode 100644
+index 0000000..0caca19
+--- /dev/null
++++ b/mqi_communicator/.pre-commit-config.yaml
+@@ -0,0 +1,15 @@
++repos:
++  - repo: https://github.com/psf/black
++    rev: 23.11.0
++    hooks:
++      - id: black
++        language_version: python3.11
++  - repo: https://github.com/pycqa/flake8
++    rev: 6.1.0
++    hooks:
++      - id: flake8
++  - repo: https://github.com/pre-commit/mirrors-mypy
++    rev: v1.7.0
++    hooks:
++      - id: mypy
++        args: [--strict, --ignore-missing-imports]
+diff --git a/mqi_communicator/config.yaml b/mqi_communicator/config.yaml
+new file mode 100644
+index 0000000..f20c93f
+--- /dev/null
++++ b/mqi_communicator/config.yaml
+@@ -0,0 +1,21 @@
++app:
++  state_file: "/tmp/mqi_state.json"
++  log_file: "/tmp/mqi.log"
++  pid_file: "/tmp/mqi.pid"
++
++ssh:
++  host: "your_hpc_host"
++  port: 22
++  username: "your_username"
++  key_file: "~/.ssh/id_rsa"
++  pool_size: 5
++
++paths:
++  local_logdata: "/path/to/your/local/data"
++  remote_workspace: "/path/to/your/remote/workspace"
++
++resources:
++  gpu_count: 6
++
++processing:
++  scan_interval_seconds: 60
+diff --git a/mqi_communicator/docker-compose.test.yml b/mqi_communicator/docker-compose.test.yml
+new file mode 100644
+index 0000000..db0162e
+--- /dev/null
++++ b/mqi_communicator/docker-compose.test.yml
+@@ -0,0 +1,16 @@
++version: '3.8'
++services:
++  sshd:
++    image: linuxserver/openssh-server
++    container_name: mqi-test-sshd
++    ports:
++      - "2222:2222"
++    environment:
++      - PUID=1000
++      - PGID=1000
++      - TZ=Etc/UTC
++      - USER_NAME=testuser
++      - USER_PASSWORD=testpass
++      - PASSWORD_ACCESS=true
++    volumes:
++      - ./remote_workspace:/home/testuser/workspace
+diff --git a/mqi_communicator/pyproject.toml b/mqi_communicator/pyproject.toml
+new file mode 100644
+index 0000000..2ce85d5
+--- /dev/null
++++ b/mqi_communicator/pyproject.toml
+@@ -0,0 +1,25 @@
++[tool.poetry]
++name = "mqi-communicator"
++version = "2.0.0"
++description = "A system to automate medical physics QA workflows."
++authors = ["Jules <agent@anthropic.com>"]
++
++[tool.poetry.dependencies]
++python = "^3.11"
++
++[tool.poetry.dev-dependencies]
++pytest = "^7.0"
++black = "^23.0"
++flake8 = "^6.0"
++mypy = "^1.0"
++pre-commit = "^3.0"
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
++
++[tool.black]
++line-length = 100
++
++[tool.mypy]
++strict = true
++ignore_missing_imports = true
+diff --git a/mqi_communicator/src/__init__.py b/mqi_communicator/src/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/src/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/src/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..fc6a309
+Binary files /dev/null and b/mqi_communicator/src/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/__pycache__/container.cpython-312.pyc b/mqi_communicator/src/__pycache__/container.cpython-312.pyc
+new file mode 100644
+index 0000000..d3db750
+Binary files /dev/null and b/mqi_communicator/src/__pycache__/container.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/container.py b/mqi_communicator/src/container.py
+new file mode 100644
+index 0000000..c95b2ad
+--- /dev/null
++++ b/mqi_communicator/src/container.py
+@@ -0,0 +1,85 @@
++from pathlib import Path
++from dependency_injector import containers, providers
++
++from .infrastructure.config import ConfigManager
++from .infrastructure.state import StateManager
++from .infrastructure.connection import SSHConnectionPool
++from .infrastructure.executors import LocalExecutor, RemoteExecutor
++from .infrastructure.repositories import CaseRepository, JobRepository
++from .infrastructure.file_system import LocalFileSystem
++from .services.resource_service import ResourceService
++from .services.case_service import CaseService
++from .services.job_service import JobService
++from .services.transfer_service import TransferService
++from .domain.task_scheduler import TaskScheduler
++from .domain.system_monitor import SystemMonitor
++from .domain.workflow_orchestrator import WorkflowOrchestrator
++
++class Container(containers.DeclarativeContainer):
++    """
++    The main dependency injection container for the application.
++
++    This container is responsible for creating and wiring all the components
++    of the application.
++    """
++
++    config = providers.Configuration()
++
++    # Infrastructure
++    state_manager = providers.Singleton(
++        StateManager,
++        state_path=providers.Factory(Path, config.app.state_file)
++    )
++
++    ssh_pool = providers.Singleton(
++        SSHConnectionPool,
++        config=config.ssh,
++        pool_size=config.ssh.pool_size.as_int()
++    )
++
++    local_executor = providers.Singleton(LocalExecutor)
++    remote_executor = providers.Singleton(RemoteExecutor, connection_pool=ssh_pool)
++
++    file_system = providers.Singleton(LocalFileSystem)
++
++    # Repositories
++    case_repo = providers.Singleton(CaseRepository, state_manager=state_manager)
++    job_repo = providers.Singleton(JobRepository, state_manager=state_manager)
++
++    # Services
++    resource_service = providers.Singleton(ResourceService, total_gpus=config.resources.gpu_count.as_int())
++
++    case_service = providers.Singleton(
++        CaseService,
++        case_repository=case_repo,
++        file_system=file_system,
++        scan_path=config.paths.local_logdata
++    )
++
++    job_service = providers.Singleton(
++        JobService,
++        job_repository=job_repo,
++        resource_service=resource_service
++    )
++
++    transfer_service = providers.Singleton(
++        TransferService,
++        remote_executor=remote_executor,
++        local_data_path=config.paths.local_logdata,
++        remote_workspace=config.paths.remote_workspace
++    )
++
++    # Domain
++    task_scheduler = providers.Singleton(
++        TaskScheduler,
++        case_service=case_service,
++        job_service=job_service
++    )
++
++    system_monitor = providers.Singleton(SystemMonitor)
++
++    workflow_orchestrator = providers.Singleton(
++        WorkflowOrchestrator,
++        case_service=case_service,
++        task_scheduler=task_scheduler
++    )
+diff --git a/mqi_communicator/src/controllers/__init__.py b/mqi_communicator/src/controllers/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/src/controllers/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/src/controllers/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..6167a14
+Binary files /dev/null and b/mqi_communicator/src/controllers/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/controllers/__pycache__/application.cpython-312.pyc b/mqi_communicator/src/controllers/__pycache__/application.cpython-312.pyc
+new file mode 100644
+index 0000000..b13ac7c
+Binary files /dev/null and b/mqi_communicator/src/controllers/__pycache__/application.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/controllers/__pycache__/interfaces.cpython-312.pyc b/mqi_communicator/src/controllers/__pycache__/interfaces.cpython-312.pyc
+new file mode 100644
+index 0000000..b25c607
+Binary files /dev/null and b/mqi_communicator/src/controllers/__pycache__/interfaces.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/controllers/__pycache__/lifecycle_manager.cpython-312.pyc b/mqi_communicator/src/controllers/__pycache__/lifecycle_manager.cpython-312.pyc
+new file mode 100644
+index 0000000..d56a619
+Binary files /dev/null and b/mqi_communicator/src/controllers/__pycache__/lifecycle_manager.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/controllers/application.py b/mqi_communicator/src/controllers/application.py
+new file mode 100644
+index 0000000..19bcfe7
+--- /dev/null
++++ b/mqi_communicator/src/controllers/application.py
+@@ -0,0 +1,65 @@
++import time
++import logging
++
++from .interfaces import IApplication, ILifecycleManager
++from ..domain.interfaces import IWorkflowOrchestrator
++
++logger = logging.getLogger(__name__)
++
++class Application(IApplication):
++    """
++    The main application class.
++
++    This class orchestrates the entire application lifecycle, including
++    startup, the main processing loop, and shutdown.
++
++    Args:
++        lifecycle_manager (ILifecycleManager): The manager for process lifecycle.
++        orchestrator (IWorkflowOrchestrator): The main workflow orchestrator.
++        scan_interval (int): The interval in seconds between scans for new cases.
++    """
++    def __init__(
++        self,
++        lifecycle_manager: ILifecycleManager,
++        orchestrator: IWorkflowOrchestrator,
++        scan_interval: int = 60,
++    ):
++        self._lm = lifecycle_manager
++        self._orchestrator = orchestrator
++        self._scan_interval = scan_interval
++        self._running = False
++
++    def start(self) -> None:
++        """
++        Starts the main application loop.
++        """
++        if not self._lm.acquire_lock():
++            logger.error("Application is already running. Exiting.")
++            return
++
++        self._lm.register_shutdown_handler(self.shutdown)
++        self._running = True
++        logger.info("Application started.")
++
++        while self._running:
++            try:
++                self._orchestrator.process_new_cases()
++                logger.info(f"Main loop iteration complete. Waiting {self._scan_interval} seconds.")
++                time.sleep(self._scan_interval)
++            except Exception as e:
++                logger.error(f"An error occurred in the main loop: {e}", exc_info=True)
++                # In a real-world scenario, you might want more sophisticated error handling here,
++                # like a circuit breaker for the main loop or a limited number of retries.
++                time.sleep(self._scan_interval)
++
++    def shutdown(self) -> None:
++        """
++        Performs a graceful shutdown of the application.
++        """
++        if not self._running:
++            return
++
++        logger.info("Shutting down application...")
++        self._running = False
++        self._lm.release_lock()
++        logger.info("Application shutdown complete.")
+diff --git a/mqi_communicator/src/controllers/interfaces.py b/mqi_communicator/src/controllers/interfaces.py
+new file mode 100644
+index 0000000..2e654d4
+--- /dev/null
++++ b/mqi_communicator/src/controllers/interfaces.py
+@@ -0,0 +1,27 @@
++from typing import Protocol, Callable
++
++class ILifecycleManager(Protocol):
++    """An interface for managing the application's lifecycle."""
++
++    def acquire_lock(self) -> bool:
++        """Acquires a process lock to ensure single instance running."""
++        ...
++
++    def release_lock(self) -> None:
++        """Releases the process lock."""
++        ...
++
++    def register_shutdown_handler(self, handler: Callable) -> None:
++        """Registers a handler to be called on graceful shutdown."""
++        ...
++
++class IApplication(Protocol):
++    """An interface for the main application."""
++
++    def start(self) -> None:
++        """Starts the main application loop."""
++        ...
++
++    def shutdown(self) -> None:
++        """Performs a graceful shutdown of the application."""
++        ...
+diff --git a/mqi_communicator/src/controllers/lifecycle_manager.py b/mqi_communicator/src/controllers/lifecycle_manager.py
+new file mode 100644
+index 0000000..b9383f4
+--- /dev/null
++++ b/mqi_communicator/src/controllers/lifecycle_manager.py
+@@ -0,0 +1,76 @@
++import os
++import signal
++import logging
++from pathlib import Path
++from typing import Callable
++
++from .interfaces import ILifecycleManager
++
++logger = logging.getLogger(__name__)
++
++class LifecycleManager(ILifecycleManager):
++    """
++    Manages the application's lifecycle, including PID file locking and
++    graceful shutdown signal handling.
++
++    Args:
++        pid_file (Path): The path to the PID file to use for locking.
++    """
++    def __init__(self, pid_file: Path):
++        self._pid_file = pid_file
++        self._pid_fd = None
++
++    def acquire_lock(self) -> bool:
++        """
++        Acquires a process lock using a PID file.
++
++        This ensures that only one instance of the application can run at a time.
++
++        Returns:
++            True if the lock was acquired, False otherwise.
++        """
++        if self._pid_file.exists():
++            try:
++                with open(self._pid_file, 'r') as f:
++                    pid = int(f.read().strip())
++                # Check if the process is actually running
++                os.kill(pid, 0)
++                logger.warning(f"Application is already running with PID {pid}.")
++                return False
++            except (IOError, OSError, ValueError):
++                # The PID file is stale, so we can overwrite it.
++                logger.warning("Stale PID file found. Overwriting.")
++                self._pid_file.unlink()
++
++        try:
++            self._pid_fd = os.open(self._pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++            os.write(self._pid_fd, str(os.getpid()).encode())
++            logger.info(f"Acquired process lock with PID {os.getpid()}.")
++            return True
++        except (IOError, OSError):
++            logger.exception("Failed to acquire process lock.")
++            return False
++
++    def release_lock(self) -> None:
++        """
++        Releases the process lock by closing and deleting the PID file.
++        """
++        if self._pid_fd:
++            os.close(self._pid_fd)
++            self._pid_file.unlink()
++            logger.info("Process lock released.")
++
++    def register_shutdown_handler(self, handler: Callable[..., None]) -> None:
++        """
++        Registers a handler to be called on SIGINT or SIGTERM.
++
++        Args:
++            handler: The function to call upon receiving a shutdown signal.
++        """
++        def signal_handler(signum, frame):
++            logger.info(f"Received shutdown signal: {signal.Signals(signum).name}")
++            handler()
++
++        signal.signal(signal.SIGINT, signal_handler)
++        signal.signal(signal.SIGTERM, signal_handler)
++        logger.info("Registered shutdown handlers.")
+diff --git a/mqi_communicator/src/domain/.gitkeep b/mqi_communicator/src/domain/.gitkeep
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/src/domain/__init__.py b/mqi_communicator/src/domain/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/src/domain/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..0a16183
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/__pycache__/interfaces.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/interfaces.cpython-312.pyc
+new file mode 100644
+index 0000000..79331ab
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/interfaces.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/__pycache__/models.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/models.cpython-312.pyc
+new file mode 100644
+index 0000000..5fc11fd
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/models.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/__pycache__/repositories.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/repositories.cpython-312.pyc
+new file mode 100644
+index 0000000..0ffe4d5
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/repositories.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/__pycache__/system_monitor.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/system_monitor.cpython-312.pyc
+new file mode 100644
+index 0000000..3b7cb35
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/system_monitor.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/__pycache__/task_scheduler.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/task_scheduler.cpython-312.pyc
+new file mode 100644
+index 0000000..8f213d7
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/task_scheduler.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/__pycache__/workflow_orchestrator.cpython-312.pyc b/mqi_communicator/src/domain/__pycache__/workflow_orchestrator.cpython-312.pyc
+new file mode 100644
+index 0000000..d933ee7
+Binary files /dev/null and b/mqi_communicator/src/domain/__pycache__/workflow_orchestrator.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/domain/interfaces.py b/mqi_communicator/src/domain/interfaces.py
+new file mode 100644
+index 0000000..86f7b65
+--- /dev/null
++++ b/mqi_communicator/src/domain/interfaces.py
+@@ -0,0 +1,52 @@
++from typing import Protocol, Optional
++from .models import Task
++
++from dataclasses import dataclass
++
++@dataclass
++class GPUStatus:
++    """Represents the status of a single GPU."""
++    id: int
++    name: str
++    memory_total: int
++    memory_used: int
++    utilization: int
++
++@dataclass
++class DiskUsage:
++    """Represents the disk usage of a filesystem path."""
++    total: int
++    used: int
++    free: int
++    percent: float
++
++class ISystemMonitor(Protocol):
++    """An interface for a system monitor."""
++    def get_cpu_usage(self) -> float:
++        ...
++
++    def get_gpu_status(self) -> list[GPUStatus]:
++        ...
++
++    def get_disk_usage(self, path: str) -> DiskUsage:
++        ...
++
++class IWorkflowOrchestrator(Protocol):
++    """An interface for the main workflow orchestrator."""
++    def process_new_cases(self) -> None:
++        ...
++
++class ITaskScheduler(Protocol):
++    """An interface for a task scheduler."""
++
++    def schedule_case(self, case_id: str) -> None:
++        """Schedules all the necessary tasks for a given case."""
++        ...
++
++    def get_next_task(self) -> Optional[Task]:
++        """Gets the next task to be executed from the queue."""
++        ...
++
++    def complete_task(self, task_id: str) -> None:
++        """Marks a task as complete."""
++        ...
+diff --git a/mqi_communicator/src/domain/models.py b/mqi_communicator/src/domain/models.py
+new file mode 100644
+index 0000000..9042885
+--- /dev/null
++++ b/mqi_communicator/src/domain/models.py
+@@ -0,0 +1,89 @@
++from dataclasses import dataclass, field
++from datetime import datetime, timezone
++from enum import Enum
++from typing import List, Optional, Dict, Any
++
++class CaseStatus(Enum):
++    """Enumeration for the status of a case."""
++    NEW = "new"
++    QUEUED = "queued"
++    PROCESSING = "processing"
++    COMPLETED = "completed"
++    FAILED = "failed"
++
++class JobStatus(Enum):
++    """Enumeration for the status of a job."""
++    PENDING = "pending"
++    RUNNING = "running"
++    COMPLETED = "completed"
++    FAILED = "failed"
++
++class TaskType(Enum):
++    """Enumeration for the type of a task."""
++    UPLOAD = "upload"
++    INTERPRET = "interpret"
++    BEAM_CALC = "beam_calc"
++    CONVERT = "convert"
++    DOWNLOAD = "download"
++
++@dataclass
++class Case:
++    """
++    Represents a single patient case to be processed.
++
++    Attributes:
++        case_id: Unique identifier for the case.
++        status: The current status of the case, from the CaseStatus enum.
++        beam_count: The number of beams to be calculated for this case.
++        created_at: Timestamp when the case was first registered.
++        updated_at: Timestamp of the last update to the case.
++        metadata: A dictionary for storing any other relevant case information.
++    """
++    case_id: str
++    status: CaseStatus = CaseStatus.NEW
++    beam_count: int = 0
++    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
++    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
++    metadata: Dict[str, Any] = field(default_factory=dict)
++
++@dataclass
++class Job:
++    """
++    Represents a processing job, which is part of a case.
++
++    Attributes:
++        job_id: Unique identifier for the job.
++        case_id: The ID of the case this job belongs to.
++        status: The current status of the job, from the JobStatus enum.
++        gpu_allocation: A list of GPU IDs allocated to this job.
++        priority: The priority of the job for scheduling.
++        created_at: Timestamp when the job was created.
++        started_at: Timestamp when the job started processing.
++        completed_at: Timestamp when the job finished processing.
++    """
++    job_id: str
++    case_id: str
++    status: JobStatus = JobStatus.PENDING
++    gpu_allocation: List[int] = field(default_factory=list)
++    priority: int = 1
++    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
++    started_at: Optional[datetime] = None
++    completed_at: Optional[datetime] = None
++
++@dataclass
++class Task:
++    """
++    Represents a single, discrete task within a job.
++
++    Attributes:
++        task_id: Unique identifier for the task.
++        job_id: The ID of the job this task belongs to.
++        type: The type of the task, from the TaskType enum.
++        parameters: A dictionary of parameters required for this task.
++        status: The current status of the task.
++    """
++    task_id: str
++    job_id: str
++    type: TaskType
++    parameters: Dict[str, Any] = field(default_factory=dict)
++    status: str = "pending" # Simplified status for now
+diff --git a/mqi_communicator/src/domain/repositories.py b/mqi_communicator/src/domain/repositories.py
+new file mode 100644
+index 0000000..9a3cd41
+--- /dev/null
++++ b/mqi_communicator/src/domain/repositories.py
+@@ -0,0 +1,40 @@
++from typing import Protocol, List, Optional
++from .models import Case, Job
++
++class ICaseRepository(Protocol):
++    """Interface for a repository that manages Case objects."""
++
++    def add(self, case: Case) -> None:
++        """Adds a new case to the repository."""
++        ...
++
++    def get(self, case_id: str) -> Optional[Case]:
++        """Gets a case by its ID."""
++        ...
++
++    def list_all(self) -> List[Case]:
++        """Lists all cases in the repository."""
++        ...
++
++    def update(self, case: Case) -> None:
++        """Updates an existing case."""
++        ...
++
++class IJobRepository(Protocol):
++    """Interface for a repository that manages Job objects."""
++
++    def add(self, job: Job) -> None:
++        """Adds a new job to the repository."""
++        ...
++
++    def get(self, job_id: str) -> Optional[Job]:
++        """Gets a job by its ID."""
++        ...
++
++    def list_all(self) -> List[Job]:
++        """Lists all jobs in the repository."""
++        ...
++
++    def update(self, job: Job) -> None:
++        """Updates an existing job."""
++        ...
+diff --git a/mqi_communicator/src/domain/system_monitor.py b/mqi_communicator/src/domain/system_monitor.py
+new file mode 100644
+index 0000000..dcc3e5e
+--- /dev/null
++++ b/mqi_communicator/src/domain/system_monitor.py
+@@ -0,0 +1,72 @@
++import psutil
++import logging
++from .interfaces import ISystemMonitor, GPUStatus, DiskUsage
++
++logger = logging.getLogger(__name__)
++
++import pynvml
++
++class SystemMonitor(ISystemMonitor):
++    """
++    A service that monitors system hardware resources like CPU, disk, and GPU.
++    """
++    def __init__(self):
++        self._nvml_initialized = False
++        try:
++            pynvml.nvmlInit()
++            self._nvml_initialized = True
++            logger.info("Successfully initialized NVML for GPU monitoring.")
++        except pynvml.NVMLError as e:
++            logger.warning(f"Could not initialize NVML. GPU monitoring will be disabled. Error: {e}")
++
++    def get_cpu_usage(self) -> float:
++        """Returns the system-wide CPU utilization as a percentage."""
++        return psutil.cpu_percent(interval=1)
++
++    def get_disk_usage(self, path: str) -> DiskUsage:
++        """
++        Returns the disk usage for the filesystem of a given path.
++
++        Args:
++            path (str): The path to check disk usage for.
++
++        Returns:
++            A DiskUsage object with usage statistics in bytes.
++        """
++        usage = psutil.disk_usage(path)
++        return DiskUsage(
++            total=usage.total,
++            used=usage.used,
++            free=usage.free,
++            percent=usage.percent
++        )
++
++    def get_gpu_status(self) -> list[GPUStatus]:
++        """
++        Returns the status of all available NVIDIA GPUs.
++
++        If NVML is not available or fails, returns an empty list.
++        """
++        if not self._nvml_initialized:
++            return []
++
++        try:
++            statuses = []
++            device_count = pynvml.nvmlDeviceGetCount()
++            for i in range(device_count):
++                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
++                name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
++                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
++                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
++
++                statuses.append(GPUStatus(
++                    id=i,
++                    name=name,
++                    memory_total=memory_info.total,
++                    memory_used=memory_info.used,
++                    utilization=utilization.gpu
++                ))
++            return statuses
++        except pynvml.NVMLError as e:
++            logger.error(f"Failed to query GPU status: {e}")
++            return []
+diff --git a/mqi_communicator/src/domain/task_scheduler.py b/mqi_communicator/src/domain/task_scheduler.py
+new file mode 100644
+index 0000000..85de29e
+--- /dev/null
++++ b/mqi_communicator/src/domain/task_scheduler.py
+@@ -0,0 +1,74 @@
++from collections import deque
++from typing import Deque, Optional
++
++from .models import Task, TaskType, Case, Job
++from ..services.interfaces import ICaseService, IJobService
++from .interfaces import ITaskScheduler
++
++class TaskScheduler(ITaskScheduler):
++    """
++    A simple, in-memory task scheduler that creates a fixed sequence of tasks for a case.
++
++    This scheduler is responsible for generating the tasks required to process
++    a case and providing them in the correct order.
++
++    Args:
++        case_service (ICaseService): The service for retrieving case information.
++        job_service (IJobService): The service for creating jobs.
++    """
++    def __init__(self, case_service: ICaseService, job_service: IJobService):
++        self._case_service = case_service
++        self._job_service = job_service
++        self._task_queue: Deque[Task] = deque()
++
++    def schedule_case(self, case_id: str) -> None:
++        """
++        Schedules all the necessary tasks for a given case.
++
++        This creates a new job for the case and populates the task queue
++        with the standard sequence of tasks.
++
++        Args:
++            case_id (str): The ID of the case to schedule.
++        """
++        case = self._case_service.get_case(case_id)
++        if not case:
++            # Handle case not found, maybe log an error
++            return
++
++        job = self._job_service.create_job(case.case_id)
++
++        # Create a fixed sequence of tasks for the job
++        tasks = [
++            Task(task_id=f"{job.job_id}_upload", job_id=job.job_id, type=TaskType.UPLOAD),
++            Task(task_id=f"{job.job_id}_interpret", job_id=job.job_id, type=TaskType.INTERPRET),
++            Task(task_id=f"{job.job_id}_beam_calc", job_id=job.job_id, type=TaskType.BEAM_CALC),
++            Task(task_id=f"{job.job_id}_convert", job_id=job.job_id, type=TaskType.CONVERT),
++            Task(task_id=f"{job.job_id}_download", job_id=job.job_id, type=TaskType.DOWNLOAD),
++        ]
++        self._task_queue.extend(tasks)
++
++    def get_next_task(self) -> Optional[Task]:
++        """
++        Gets the next task to be executed from the queue.
++
++        Returns:
++            The next Task object if the queue is not empty, otherwise None.
++        """
++        if not self._task_queue:
++            return None
++        return self._task_queue.popleft()
++
++    def complete_task(self, task_id: str) -> None:
++        """
++        Marks a task as complete.
++
++        Note: In this simple implementation, this method does nothing. A more
++        complex scheduler might update a task repository or trigger dependent tasks.
++
++        Args:
++            task_id (str): The ID of the task to mark as complete.
++        """
++        # In a more advanced implementation, we might have a task repository
++        # and update the task's status here.
++        pass
+diff --git a/mqi_communicator/src/domain/workflow_orchestrator.py b/mqi_communicator/src/domain/workflow_orchestrator.py
+new file mode 100644
+index 0000000..758179d
+--- /dev/null
++++ b/mqi_communicator/src/domain/workflow_orchestrator.py
+@@ -0,0 +1,40 @@
++from ..services.interfaces import ICaseService
++from .interfaces import ITaskScheduler, IWorkflowOrchestrator
++import logging
++
++logger = logging.getLogger(__name__)
++
++class WorkflowOrchestrator(IWorkflowOrchestrator):
++    """
++    The main orchestrator for the application's workflow.
++
++    This class coordinates the high-level process of scanning for new cases
++    and scheduling them for processing.
++
++    Args:
++        case_service (ICaseService): The service for finding new cases.
++        task_scheduler (ITaskScheduler): The scheduler for queueing up tasks.
++    """
++    def __init__(self, case_service: ICaseService, task_scheduler: ITaskScheduler):
++        self._case_service = case_service
++        self._task_scheduler = task_scheduler
++
++    def process_new_cases(self) -> None:
++        """
++        Scans for new cases and schedules them for processing.
++        """
++        logger.info("Starting scan for new cases...")
++        try:
++            new_case_ids = self._case_service.scan_for_new_cases()
++            if not new_case_ids:
++                logger.info("No new cases found.")
++                return
++
++            logger.info(f"Found {len(new_case_ids)} new cases: {new_case_ids}")
++            for case_id in new_case_ids:
++                logger.info(f"Scheduling tasks for case: {case_id}")
++                self._task_scheduler.schedule_case(case_id)
++
++            logger.info("Finished scheduling new cases.")
++        except Exception as e:
++            logger.error(f"An unexpected error occurred during case processing: {e}", exc_info=True)
+diff --git a/mqi_communicator/src/infrastructure/__init__.py b/mqi_communicator/src/infrastructure/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..3774b12
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/config.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/config.cpython-312.pyc
+new file mode 100644
+index 0000000..4112ba0
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/config.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/connection.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/connection.cpython-312.pyc
+new file mode 100644
+index 0000000..97a1f7c
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/connection.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/executors.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/executors.cpython-312.pyc
+new file mode 100644
+index 0000000..02164f2
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/executors.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/file_system.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/file_system.cpython-312.pyc
+new file mode 100644
+index 0000000..9e1da4c
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/file_system.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/json_encoder.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/json_encoder.cpython-312.pyc
+new file mode 100644
+index 0000000..1868a26
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/json_encoder.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/repositories.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/repositories.cpython-312.pyc
+new file mode 100644
+index 0000000..9cc7fee
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/repositories.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/resilience.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/resilience.cpython-312.pyc
+new file mode 100644
+index 0000000..0534418
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/resilience.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/__pycache__/state.cpython-312.pyc b/mqi_communicator/src/infrastructure/__pycache__/state.cpython-312.pyc
+new file mode 100644
+index 0000000..fd09f91
+Binary files /dev/null and b/mqi_communicator/src/infrastructure/__pycache__/state.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/infrastructure/config.py b/mqi_communicator/src/infrastructure/config.py
+new file mode 100644
+index 0000000..70e1444
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/config.py
+@@ -0,0 +1,29 @@
++import yaml
++from pathlib import Path
++
++class ConfigurationError(Exception):
++    pass
++
++class ConfigManager:
++    def __init__(self, config_path: Path):
++        self.config_path = config_path
++        self.config = self._load_config()
++
++    def _load_config(self):
++        if not self.config_path.is_file():
++            raise ConfigurationError(f"Configuration file not found at {self.config_path}")
++        try:
++            with open(self.config_path, 'r') as f:
++                return yaml.safe_load(f)
++        except yaml.YAMLError as e:
++            raise ConfigurationError(f"Error parsing YAML file: {e}")
++
++    def get(self, key, default=None):
++        keys = key.split('.')
++        value = self.config
++        for k in keys:
++            if isinstance(value, dict):
++                value = value.get(k)
++            else:
++                return default
++        return value if value is not None else default
+diff --git a/mqi_communicator/src/infrastructure/connection.py b/mqi_communicator/src/infrastructure/connection.py
+new file mode 100644
+index 0000000..04e6aaa
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/connection.py
+@@ -0,0 +1,151 @@
++import queue
++import threading
++from contextlib import contextmanager
++import paramiko
++
++class ConnectionError(Exception):
++    pass
++
++class SSHConnectionPool:
++    """
++    A thread-safe pool for managing and reusing Paramiko SSH connections.
++
++    This pool handles the creation, distribution, and recycling of SSH connections
++    to a remote host. It is designed to be resilient, replacing broken connections
++    automatically.
++
++    Args:
++        config (dict): A dictionary containing SSH connection parameters, including
++                       'host', 'port', 'username', and authentication details
++                       ('password' or 'key_file').
++        pool_size (int): The maximum number of concurrent connections to maintain.
++
++    Raises:
++        ConnectionError: If the initial pool cannot be created.
++    """
++    def __init__(self, config: dict, pool_size: int = 5):
++        if not all(k in config for k in ["host", "port", "username"]):
++            raise ConnectionError("SSH config must include host, port, and username.")
++
++        self.config = config
++        self.pool_size = pool_size
++        self._pool = queue.Queue(maxsize=pool_size)
++        self._lock = threading.Lock()
++        self._initialize_pool()
++
++    def _initialize_pool(self):
++        with self._lock:
++            try:
++                for _ in range(self.pool_size):
++                    conn = self._create_connection()
++                    self._pool.put(conn)
++            except ConnectionError as e:
++                # Wrap the specific connection error in a more general pool initialization error
++                raise ConnectionError(f"Failed to create initial SSH connections: {e}")
++
++    def _create_connection(self) -> paramiko.SSHClient:
++        """
++        Creates and returns a new Paramiko SSH client.
++
++        This method explicitly uses an IPv4 socket to ensure compatibility
++        across different network environments.
++
++        Returns:
++            paramiko.SSHClient: A connected SSH client.
++
++        Raises:
++            ConnectionError: If the SSH connection cannot be established.
++        """
++        import socket
++        hostname = self.config.get("host")
++        port = self.config.get("port")
++
++        try:
++            # Force IPv4 by using AF_INET
++            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++            # Set a timeout for the connection attempt
++            sock.settimeout(10)
++            sock.connect((hostname, port))
++
++            client = paramiko.SSHClient()
++            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
++
++            # Use the existing socket. For more details on params, see:
++            # https://docs.paramiko.org/en/stable/api/client.html#paramiko.client.SSHClient.connect
++            client.connect(
++                hostname=hostname,
++                port=port,
++                username=self.config.get("username"),
++                key_filename=self.config.get("key_file"),
++                password=self.config.get("password"),
++                sock=sock,
++                timeout=10
++            )
++            return client
++        except (paramiko.SSHException, socket.error) as e:
++            raise ConnectionError(f"Failed to establish SSH connection: {e}")
++
++    def get_connection(self, timeout: float = 30.0) -> paramiko.SSHClient:
++        """
++        Retrieves a connection from the pool.
++
++        Args:
++            timeout (float): The maximum time in seconds to wait for a connection
++                             to become available.
++
++        Returns:
++            paramiko.SSHClient: An active SSH client.
++
++        Raises:
++            ConnectionError: If no connection is available within the timeout.
++        """
++        try:
++            return self._pool.get(block=True, timeout=timeout)
++        except queue.Empty:
++            raise ConnectionError("Timeout waiting for an SSH connection from the pool.")
++
++    def release_connection(self, connection: paramiko.SSHClient):
++        """
++        Returns a connection to the pool for reuse.
++
++        If the connection is found to be inactive or broken, it is discarded,
++        and a new connection is created to maintain the pool size.
++
++        Args:
++            connection (paramiko.SSHClient): The connection to return to the pool.
++        """
++        if connection.get_transport() and connection.get_transport().is_active():
++            self._pool.put(connection)
++        else:
++            # Connection is broken, create a new one to replace it
++            try:
++                new_conn = self._create_connection()
++                self._pool.put(new_conn)
++            except ConnectionError:
++                # If we can't create a new one, just discard the old one
++                # The pool size will shrink, but it's better than blocking
++                pass
++
++    @contextmanager
++    def connection_context(self, timeout: float = 30.0):
++        """
++        A context manager for safely acquiring and releasing a connection.
++
++        This is the preferred way to use connections from the pool, as it
++        ensures that connections are always returned, even if errors occur.
++
++        Usage:
++            with pool.connection_context() as conn:
++                conn.exec_command("ls -l")
++
++        Args:
++            timeout (float): The maximum time to wait for a connection.
++
++        Yields:
++            paramiko.SSHClient: An active SSH client.
++        """
++        connection = self.get_connection(timeout)
++        try:
++            yield connection
++        finally:
++            self.release_connection(connection)
+diff --git a/mqi_communicator/src/infrastructure/executors.py b/mqi_communicator/src/infrastructure/executors.py
+new file mode 100644
+index 0000000..402fcf8
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/executors.py
+@@ -0,0 +1,68 @@
++from typing import Protocol, Tuple
++
++import subprocess
++from typing import Tuple, Protocol
++
++class IExecutor(Protocol):
++    """An interface for command executors."""
++
++    def execute(self, command: str) -> Tuple[int, str, str]:
++        """
++        Executes a command and returns the result.
++
++        Args:
++            command (str): The command to execute.
++
++        Returns:
++            A tuple containing the exit code (int), stdout (str), and stderr (str).
++        """
++        ...
++
++from .connection import SSHConnectionPool
++
++class RemoteExecutor(IExecutor):
++    """
++    An executor that runs commands on a remote machine over SSH.
++
++    This executor uses a connection pool to manage SSH connections.
++    """
++    def __init__(self, connection_pool: SSHConnectionPool):
++        self.pool = connection_pool
++
++    def execute(self, command: str) -> Tuple[int, str, str]:
++        """
++        Executes a shell command on the remote host.
++
++        Args:
++            command (str): The command to execute.
++
++        Returns:
++            A tuple containing the command's exit code, stdout, and stderr.
++        """
++        with self.pool.connection_context() as conn:
++            _, stdout, stderr = conn.exec_command(command)
++            exit_code = stdout.channel.recv_exit_status()
++            return exit_code, stdout.read().decode('utf-8'), stderr.read().decode('utf-8')
++
++class LocalExecutor(IExecutor):
++    """
++    An executor that runs commands on the local machine using subprocess.
++    """
++    def execute(self, command: str) -> Tuple[int, str, str]:
++        """
++        Executes a shell command on the local host.
++
++        Args:
++            command (str): The command to execute.
++
++        Returns:
++            A tuple containing the command's exit code, stdout, and stderr.
++        """
++        result = subprocess.run(
++            command,
++            shell=True,
++            capture_output=True,
++            text=True,
++            encoding='utf-8'
++        )
++        return result.returncode, result.stdout, result.stderr
+diff --git a/mqi_communicator/src/infrastructure/file_system.py b/mqi_communicator/src/infrastructure/file_system.py
+new file mode 100644
+index 0000000..e12dd6a
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/file_system.py
+@@ -0,0 +1,24 @@
++import os
++from typing import List
++
++from ..services.interfaces import IFileSystem
++
++class LocalFileSystem(IFileSystem):
++    """A concrete implementation of the file system interface for local disk."""
++    def list_directories(self, path: str) -> List[str]:
++        """
++        Lists all the directories in a given path.
++
++        Args:
++            path (str): The path to scan.
++
++        Returns:
++            A list of directory names.
++
++        Raises:
++            FileNotFoundError: If the path does not exist.
++        """
++        if not os.path.exists(path):
++            raise FileNotFoundError(f"The specified path does not exist: {path}")
++
++        return [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+diff --git a/mqi_communicator/src/infrastructure/json_encoder.py b/mqi_communicator/src/infrastructure/json_encoder.py
+new file mode 100644
+index 0000000..4343ab0
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/json_encoder.py
+@@ -0,0 +1,14 @@
++import json
++from datetime import datetime
++from enum import Enum
++
++class CustomJsonEncoder(json.JSONEncoder):
++    """
++    A custom JSON encoder that handles special types like Enum and datetime.
++    """
++    def default(self, o):
++        if isinstance(o, datetime):
++            return o.isoformat()
++        if isinstance(o, Enum):
++            return o.value
++        return super().default(o)
+diff --git a/mqi_communicator/src/infrastructure/repositories.py b/mqi_communicator/src/infrastructure/repositories.py
+new file mode 100644
+index 0000000..2bf84ba
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/repositories.py
+@@ -0,0 +1,89 @@
++from typing import List, Optional, Dict, Any
++from dataclasses import asdict
++
++from datetime import datetime
++from ..domain.models import Case, Job, CaseStatus, JobStatus
++from ..domain.repositories import ICaseRepository, IJobRepository
++from .state import StateManager
++
++class CaseRepository(ICaseRepository):
++    """
++    A repository for managing Case objects using a StateManager for persistence.
++    """
++    def __init__(self, state_manager: StateManager):
++        self._sm = state_manager
++
++    def add(self, case: Case) -> None:
++        """Adds a new case to the repository."""
++        with self._sm.transaction():
++            self._sm.set(f"cases.{case.case_id}", asdict(case))
++
++    def get(self, case_id: str) -> Optional[Case]:
++        """Gets a case by its ID."""
++        case_data = self._sm.get(f"cases.{case_id}")
++        if case_data:
++            # Convert string representations back to proper types
++            case_data["status"] = CaseStatus(case_data["status"])
++            case_data["created_at"] = datetime.fromisoformat(case_data["created_at"])
++            case_data["updated_at"] = datetime.fromisoformat(case_data["updated_at"])
++            return Case(**case_data)
++        return None
++
++    def list_all(self) -> List[Case]:
++        """Lists all cases in the repository."""
++        all_cases_data = self._sm.get("cases", {})
++        cases = []
++        for data in all_cases_data.values():
++            data["status"] = CaseStatus(data["status"])
++            data["created_at"] = datetime.fromisoformat(data["created_at"])
++            data["updated_at"] = datetime.fromisoformat(data["updated_at"])
++            cases.append(Case(**data))
++        return cases
++
++    def update(self, case: Case) -> None:
++        """Updates an existing case. For this implementation, it's the same as add."""
++        self.add(case)
++
++
++class JobRepository(IJobRepository):
++    """
++    A repository for managing Job objects using a StateManager for persistence.
++    """
++    def __init__(self, state_manager: StateManager):
++        self._sm = state_manager
++
++    def add(self, job: Job) -> None:
++        """Adds a new job to the repository."""
++        with self._sm.transaction():
++            self._sm.set(f"jobs.{job.job_id}", asdict(job))
++
++    def get(self, job_id: str) -> Optional[Job]:
++        """Gets a job by its ID."""
++        job_data = self._sm.get(f"jobs.{job_id}")
++        if job_data:
++            job_data["status"] = JobStatus(job_data["status"])
++            job_data["created_at"] = datetime.fromisoformat(job_data["created_at"])
++            if job_data.get("started_at"):
++                job_data["started_at"] = datetime.fromisoformat(job_data["started_at"])
++            if job_data.get("completed_at"):
++                job_data["completed_at"] = datetime.fromisoformat(job_data["completed_at"])
++            return Job(**job_data)
++        return None
++
++    def list_all(self) -> List[Job]:
++        """Lists all jobs in the repository."""
++        all_jobs_data = self._sm.get("jobs", {})
++        jobs = []
++        for data in all_jobs_data.values():
++            data["status"] = JobStatus(data["status"])
++            data["created_at"] = datetime.fromisoformat(data["created_at"])
++            if data.get("started_at"):
++                data["started_at"] = datetime.fromisoformat(data["started_at"])
++            if data.get("completed_at"):
++                data["completed_at"] = datetime.fromisoformat(data["completed_at"])
++            jobs.append(Job(**data))
++        return jobs
++
++    def update(self, job: Job) -> None:
++        """Updates an existing job."""
++        self.add(job)
+diff --git a/mqi_communicator/src/infrastructure/resilience.py b/mqi_communicator/src/infrastructure/resilience.py
+new file mode 100644
+index 0000000..2339092
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/resilience.py
+@@ -0,0 +1,130 @@
++import time
++import logging
++from dataclasses import dataclass
++from typing import Type, Callable
++
++logger = logging.getLogger(__name__)
++
++@dataclass
++class RetryPolicy:
++    """
++    A dataclass to define the configuration for a retry mechanism.
++
++    Args:
++        max_attempts (int): The maximum number of times to try the operation.
++        base_delay (float): The initial delay in seconds before the first retry.
++        max_delay (float): The maximum possible delay in seconds.
++        exponential_base (float): The base for the exponential backoff calculation.
++    """
++    max_attempts: int = 3
++    base_delay: float = 0.1
++    max_delay: float = 1.0
++    exponential_base: float = 2.0
++
++import enum
++
++class CircuitState(enum.Enum):
++    """An enumeration for the states of the circuit breaker."""
++    CLOSED = "closed"
++    OPEN = "open"
++    HALF_OPEN = "half_open"
++
++class CircuitBreakerError(Exception):
++    """Custom exception raised when the circuit is open."""
++    pass
++
++class CircuitBreaker:
++    """
++    A circuit breaker implementation to prevent repeated calls to a failing service.
++
++    This class is implemented as a decorator. It monitors the decorated function for
++    failures. After a certain number of failures, the circuit "opens," and subsequent
++    calls will fail immediately with a CircuitBreakerError. After a timeout period,
++    the circuit enters a "half-open" state, allowing a single trial call. If that
++    call succeeds, the circuit closes; otherwise, it re-opens.
++
++    Args:
++        failure_threshold (int): The number of failures required to open the circuit.
++        recovery_timeout (int): The time in seconds to wait before moving to HALF_OPEN.
++    """
++    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 30):
++        self._failure_threshold = failure_threshold
++        self._recovery_timeout = recovery_timeout
++        self._state = CircuitState.CLOSED
++        self._failures = 0
++        self._last_failure_time = 0.0
++
++    @property
++    def state(self) -> CircuitState:
++        """The current state of the circuit breaker."""
++        if self._state == CircuitState.OPEN:
++            if time.time() - self._last_failure_time > self._recovery_timeout:
++                return CircuitState.HALF_OPEN
++        return self._state
++
++    def __call__(self, func: Callable) -> Callable:
++        def wrapper(*args, **kwargs):
++            current_state = self.state
++            if current_state == CircuitState.OPEN:
++                raise CircuitBreakerError("Circuit is open")
++
++            try:
++                result = func(*args, **kwargs)
++                self._reset()
++                return result
++            except Exception as e:
++                self._record_failure()
++                raise e
++        return wrapper
++
++    def _reset(self):
++        """Resets the circuit breaker to the CLOSED state."""
++        self._state = CircuitState.CLOSED
++        self._failures = 0
++
++    def _record_failure(self):
++        """Records a failure and opens the circuit if the threshold is met."""
++        self._failures += 1
++        if self._failures >= self._failure_threshold:
++            self._state = CircuitState.OPEN
++            self._last_failure_time = time.time()
++
++
++def retry_on_exception(policy: RetryPolicy, exception_type: Type[Exception] = Exception) -> Callable:
++    """
++    A decorator that retries a function call based on a specified policy.
++
++    This decorator will re-invoke the decorated function if it raises a specific
++    type of exception, up to a maximum number of attempts, with an exponential
++    backoff delay between retries.
++
++    Args:
++        policy (RetryPolicy): The retry policy configuration.
++        exception_type (Type[Exception]): The specific exception type to catch and retry on.
++
++    Returns:
++        A wrapper function that incorporates the retry logic.
++    """
++    def decorator(func: Callable) -> Callable:
++        def wrapper(*args, **kwargs):
++            attempts = 0
++            while True:
++                try:
++                    return func(*args, **kwargs)
++                except exception_type as e:
++                    attempts += 1
++                    if attempts >= policy.max_attempts:
++                        logger.error(
++                            f"Function '{func.__name__}' failed after {policy.max_attempts} attempts. Giving up."
++                        )
++                        raise
++
++                    delay = min(policy.max_delay, policy.base_delay * (policy.exponential_base ** (attempts - 1)))
++
++                    logger.warning(
++                        f"Attempt {attempts} of {policy.max_attempts} for '{func.__name__}' failed with {type(e).__name__}. "
++                        f"Retrying in {delay:.2f} seconds..."
++                    )
++                    time.sleep(delay)
++        return wrapper
++    return decorator
+diff --git a/mqi_communicator/src/infrastructure/state.py b/mqi_communicator/src/infrastructure/state.py
+new file mode 100644
+index 0000000..4cde812
+--- /dev/null
++++ b/mqi_communicator/src/infrastructure/state.py
+@@ -0,0 +1,104 @@
++import threading
++import json
++from pathlib import Path
++from contextlib import contextmanager
++import copy
++from .json_encoder import CustomJsonEncoder
++
++class StateManagerError(Exception):
++    """Custom exception for StateManager errors."""
++    pass
++
++class StateManager:
++    """
++    Manages the application's state in a thread-safe manner,
++    persisting it to a JSON file.
++    """
++    def __init__(self, state_path: Path):
++        self.state_path = state_path
++        self._lock = threading.RLock()
++        self._state: dict = {}
++        self._transaction_state: dict | None = None
++        self._load_state()
++
++    def _load_state(self):
++        with self._lock:
++            if self.state_path.exists():
++                try:
++                    with open(self.state_path, 'r') as f:
++                        self._state = json.load(f)
++                except (json.JSONDecodeError, IOError) as e:
++                    raise StateManagerError(f"Failed to load state file: {e}")
++            else:
++                self._state = {}
++
++    def _save_state(self):
++        with self._lock:
++            temp_path = self.state_path.with_suffix('.tmp')
++            try:
++                with open(temp_path, 'w') as f:
++                    json.dump(self._state, f, indent=2, cls=CustomJsonEncoder)
++                temp_path.rename(self.state_path)
++            except IOError as e:
++                raise StateManagerError(f"Failed to save state file: {e}")
++
++    def get(self, key: str, default=None):
++        with self._lock:
++            target_state = self._transaction_state if self._transaction_state is not None else self._state
++            keys = key.split('.')
++            value = target_state
++            for k in keys:
++                if isinstance(value, dict):
++                    value = value.get(k)
++                else:
++                    return default
++
++            # Simulate a serialization/deserialization round trip to ensure
++            # that the returned object is not a "live" Python object with
++            # unserializable types.
++            if value is None:
++                return default
++
++            return json.loads(json.dumps(value, cls=CustomJsonEncoder))
++
++    def set(self, key: str, value):
++        with self._lock:
++            target_state = self._transaction_state if self._transaction_state is not None else self._state
++            keys = key.split('.')
++            current = target_state
++            for k in keys[:-1]:
++                current = current.setdefault(k, {})
++            current[keys[-1]] = value
++
++            if self._transaction_state is None:
++                self._save_state()
++
++    @contextmanager
++    def transaction(self):
++        self.begin_transaction()
++        try:
++            yield
++            self.commit()
++        except Exception:
++            self.rollback()
++            raise
++
++    def begin_transaction(self):
++        with self._lock:
++            if self._transaction_state is not None:
++                raise StateManagerError("A transaction is already in progress.")
++            self._transaction_state = copy.deepcopy(self._state)
++
++    def commit(self):
++        with self._lock:
++            if self._transaction_state is None:
++                raise StateManagerError("No transaction to commit.")
++            self._state = self._transaction_state
++            self._transaction_state = None
++            self._save_state()
++
++    def rollback(self):
++        with self._lock:
++            if self._transaction_state is None:
++                raise StateManagerError("No transaction to rollback.")
++            self._transaction_state = None
+diff --git a/mqi_communicator/src/main.py b/mqi_communicator/src/main.py
+new file mode 100644
+index 0000000..7b77eff
+--- /dev/null
++++ b/mqi_communicator/src/main.py
+@@ -0,0 +1,63 @@
++import sys
++import logging
++from pathlib import Path
++
++from .container import Container
++from .controllers.application import Application
++from .controllers.lifecycle_manager import LifecycleManager
++from .infrastructure.config import ConfigManager
++
++def setup_logging(log_file: Path):
++    """Sets up basic file and console logging."""
++    logging.basicConfig(
++        level=logging.INFO,
++        format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
++        handlers=[
++            logging.FileHandler(log_file),
++            logging.StreamHandler(sys.stdout)
++        ]
++    )
++
++def main():
++    """The main entry point for the application."""
++    # Load configuration
++    # In a real app, this path might come from a command-line argument
++    config_path = Path(__file__).parent.parent / "config.yaml"
++    if not config_path.exists():
++        print(f"Error: Configuration file not found at {config_path}", file=sys.stderr)
++        sys.exit(1)
++
++    config_manager = ConfigManager(config_path)
++    config = config_manager.config
++
++    # Setup logging
++    log_file = Path(config["app"]["log_file"])
++    log_file.parent.mkdir(parents=True, exist_ok=True)
++    setup_logging(log_file)
++
++    # Initialize container
++    container = Container()
++    container.config.from_dict(config)
++
++    # Manually create the top-level objects that are not managed by the container itself
++    # but use components from it.
++    pid_file = Path(config["app"]["pid_file"])
++    pid_file.parent.mkdir(parents=True, exist_ok=True)
++
++    lifecycle_manager = LifecycleManager(pid_file=pid_file)
++
++    app = Application(
++        lifecycle_manager=lifecycle_manager,
++        orchestrator=container.workflow_orchestrator(),
++        scan_interval=config["processing"]["scan_interval_seconds"]
++    )
++
++    # Start the application
++    try:
++        app.start()
++    except Exception as e:
++        logging.critical(f"A critical error caused the application to exit: {e}", exc_info=True)
++        sys.exit(1)
++
++if __name__ == "__main__":
++    main()
+diff --git a/mqi_communicator/src/services/__init__.py b/mqi_communicator/src/services/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/src/services/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/src/services/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..f9e14d1
+Binary files /dev/null and b/mqi_communicator/src/services/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/services/__pycache__/case_service.cpython-312.pyc b/mqi_communicator/src/services/__pycache__/case_service.cpython-312.pyc
+new file mode 100644
+index 0000000..55050d0
+Binary files /dev/null and b/mqi_communicator/src/services/__pycache__/case_service.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/services/__pycache__/interfaces.cpython-312.pyc b/mqi_communicator/src/services/__pycache__/interfaces.cpython-312.pyc
+new file mode 100644
+index 0000000..554ae3b
+Binary files /dev/null and b/mqi_communicator/src/services/__pycache__/interfaces.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/services/__pycache__/job_service.cpython-312.pyc b/mqi_communicator/src/services/__pycache__/job_service.cpython-312.pyc
+new file mode 100644
+index 0000000..ce21f5c
+Binary files /dev/null and b/mqi_communicator/src/services/__pycache__/job_service.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/services/__pycache__/resource_service.cpython-312.pyc b/mqi_communicator/src/services/__pycache__/resource_service.cpython-312.pyc
+new file mode 100644
+index 0000000..b051b81
+Binary files /dev/null and b/mqi_communicator/src/services/__pycache__/resource_service.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/services/__pycache__/transfer_service.cpython-312.pyc b/mqi_communicator/src/services/__pycache__/transfer_service.cpython-312.pyc
+new file mode 100644
+index 0000000..25c20ef
+Binary files /dev/null and b/mqi_communicator/src/services/__pycache__/transfer_service.cpython-312.pyc differ
+diff --git a/mqi_communicator/src/services/case_service.py b/mqi_communicator/src/services/case_service.py
+new file mode 100644
+index 0000000..52f9f05
+--- /dev/null
++++ b/mqi_communicator/src/services/case_service.py
+@@ -0,0 +1,75 @@
++from typing import List, Optional
++
++from ..domain.models import Case, CaseStatus
++from ..domain.repositories import ICaseRepository
++from .interfaces import IFileSystem, ICaseService
++
++class CaseService(ICaseService):
++    """
++    A service for managing the lifecycle of cases.
++
++    This service is responsible for finding new cases from the file system,
++    adding them to the repository, and updating their status.
++
++    Args:
++        case_repository (ICaseRepository): The repository for case data.
++        file_system (IFileSystem): The file system to scan for new cases.
++        scan_path (str): The path to scan for new case directories.
++    """
++    def __init__(
++        self,
++        case_repository: ICaseRepository,
++        file_system: IFileSystem,
++        scan_path: str
++    ):
++        self._repo = case_repository
++        self._fs = file_system
++        self._scan_path = scan_path
++
++    def scan_for_new_cases(self) -> List[str]:
++        """
++        Scans the file system for new cases and adds them to the repository.
++
++        Returns:
++            A list of case IDs for the newly found cases.
++        """
++        try:
++            fs_cases = set(self._fs.list_directories(self._scan_path))
++        except FileNotFoundError:
++            # If the scan path doesn't exist, there are no new cases.
++            return []
++
++        repo_cases = {case.case_id for case in self._repo.list_all()}
++
++        new_case_ids = list(fs_cases - repo_cases)
++
++        for case_id in new_case_ids:
++            new_case = Case(case_id=case_id)
++            self._repo.add(new_case)
++
++        return new_case_ids
++
++    def get_case(self, case_id: str) -> Optional[Case]:
++        """
++        Retrieves a case by its ID.
++
++        Args:
++            case_id (str): The ID of the case to retrieve.
++
++        Returns:
++            The Case object if found, otherwise None.
++        """
++        return self._repo.get(case_id)
++
++    def update_case_status(self, case_id: str, status: CaseStatus) -> None:
++        """
++        Updates the status of a specific case.
++
++        Args:
++            case_id (str): The ID of the case to update.
++            status (CaseStatus): The new status for the case.
++        """
++        case = self._repo.get(case_id)
++        if case:
++            case.status = status
++            self._repo.update(case)
+diff --git a/mqi_communicator/src/services/interfaces.py b/mqi_communicator/src/services/interfaces.py
+new file mode 100644
+index 0000000..78dad9a
+--- /dev/null
++++ b/mqi_communicator/src/services/interfaces.py
+@@ -0,0 +1,72 @@
++from typing import Protocol, List, Optional
++
++from ..domain.models import Case
++
++class IFileSystem(Protocol):
++    """An interface for file system operations."""
++    def list_directories(self, path: str) -> List[str]:
++        ...
++
++from ..domain.models import Job
++
++class ITransferService(Protocol):
++    """An interface for a service that manages file transfers."""
++    def upload_case(self, case_id: str) -> None:
++        ...
++
++    def download_results(self, case_id: str) -> None:
++        ...
++
++class IJobService(Protocol):
++    """An interface for a service that manages jobs."""
++    def create_job(self, case_id: str) -> Job:
++        ...
++
++    def allocate_resources_for_job(self, job: Job) -> bool:
++        ...
++
++    def complete_job(self, job_id: str) -> None:
++        ...
++
++class ICaseService(Protocol):
++    """An interface for a service that manages cases."""
++    def scan_for_new_cases(self) -> List[str]:
++        ...
++
++    def get_case(self, case_id: str) -> Optional[Case]:
++        ...
++
++    def update_case_status(self, case_id: str, status: str) -> None:
++        ...
++
++class IResourceService(Protocol):
++    """
++    An interface for a service that manages system resources, such as GPUs.
++    """
++
++    def allocate_gpus(self, count: int) -> Optional[List[int]]:
++        """
++        Allocates a specified number of GPUs.
++
++        Args:
++            count (int): The number of GPUs to allocate.
++
++        Returns:
++            A list of GPU IDs if the allocation is successful, otherwise None.
++        """
++        ...
++
++    def release_gpus(self, gpu_ids: List[int]) -> None:
++        """
++        Releases a list of GPUs back to the available pool.
++
++        Args:
++            gpu_ids (List[int]): The list of GPU IDs to release.
++        """
++        ...
++
++    def get_available_gpu_count(self) -> int:
++        """
++        Returns the number of currently available GPUs.
++        """
++        ...
+diff --git a/mqi_communicator/src/services/job_service.py b/mqi_communicator/src/services/job_service.py
+new file mode 100644
+index 0000000..3e953a7
+--- /dev/null
++++ b/mqi_communicator/src/services/job_service.py
+@@ -0,0 +1,68 @@
++import uuid
++from typing import Optional
++
++from ..domain.models import Job, JobStatus
++from ..domain.repositories import IJobRepository
++from .interfaces import IResourceService, IJobService
++
++class JobService(IJobService):
++    """
++    A service for managing the lifecycle of jobs.
++
++    This service handles job creation, resource allocation, and completion.
++
++    Args:
++        job_repository (IJobRepository): The repository for job data.
++        resource_service (IResourceService): The service for managing resources.
++    """
++    def __init__(self, job_repository: IJobRepository, resource_service: IResourceService):
++        self._repo = job_repository
++        self._resource_service = resource_service
++
++    def create_job(self, case_id: str) -> Job:
++        """
++        Creates a new job for a given case.
++
++        Args:
++            case_id (str): The ID of the case to associate the job with.
++
++        Returns:
++            The newly created Job object.
++        """
++        job_id = str(uuid.uuid4())
++        job = Job(job_id=job_id, case_id=case_id)
++        self._repo.add(job)
++        return job
++
++    def allocate_resources_for_job(self, job: Job, gpus_required: int = 1) -> bool:
++        """
++        Attempts to allocate resources for a given job.
++
++        Args:
++            job (Job): The job that requires resources.
++            gpus_required (int): The number of GPUs required for the job.
++
++        Returns:
++            True if resources were successfully allocated, False otherwise.
++        """
++        gpu_ids = self._resource_service.allocate_gpus(gpus_required)
++        if gpu_ids:
++            job.gpu_allocation = gpu_ids
++            job.status = JobStatus.RUNNING
++            self._repo.update(job)
++            return True
++        return False
++
++    def complete_job(self, job_id: str) -> None:
++        """
++        Marks a job as complete and releases its resources.
++
++        Args:
++            job_id (str): The ID of the job to complete.
++        """
++        job = self._repo.get(job_id)
++        if job:
++            if job.gpu_allocation:
++                self._resource_service.release_gpus(job.gpu_allocation)
++            job.status = JobStatus.COMPLETED
++            self._repo.update(job)
+diff --git a/mqi_communicator/src/services/resource_service.py b/mqi_communicator/src/services/resource_service.py
+new file mode 100644
+index 0000000..057a563
+--- /dev/null
++++ b/mqi_communicator/src/services/resource_service.py
+@@ -0,0 +1,53 @@
++from typing import List, Optional, Set
++import threading
++
++from .interfaces import IResourceService
++
++class ResourceService(IResourceService):
++    """
++    A service for managing and allocating GPU resources in a thread-safe manner.
++
++    This service keeps track of a finite set of GPUs, allowing them to be
++    allocated for processing jobs and released when jobs are complete.
++
++    Args:
++        total_gpus (int): The total number of GPUs available for allocation.
++    """
++    def __init__(self, total_gpus: int):
++        self._available_gpus: Set[int] = set(range(total_gpus))
++        self._lock = threading.Lock()
++
++    def allocate_gpus(self, count: int) -> Optional[List[int]]:
++        """
++        Allocates a specified number of GPUs atomically.
++
++        Args:
++            count (int): The number of GPUs to allocate.
++
++        Returns:
++            A list of GPU IDs if the allocation is successful, otherwise None.
++        """
++        with self._lock:
++            if count > len(self._available_gpus):
++                return None
++
++            # This is a simple way to get 'count' items from a set without ordering
++            allocated = [self._available_gpus.pop() for _ in range(count)]
++            return allocated
++
++    def release_gpus(self, gpu_ids: List[int]) -> None:
++        """
++        Releases a list of GPUs back to the available pool atomically.
++
++        Args:
++            gpu_ids (List[int]): The list of GPU IDs to release.
++        """
++        with self._lock:
++            self._available_gpus.update(gpu_ids)
++
++    def get_available_gpu_count(self) -> int:
++        """
++        Returns the number of currently available GPUs.
++        """
++        with self._lock:
++            return len(self._available_gpus)
+diff --git a/mqi_communicator/src/services/transfer_service.py b/mqi_communicator/src/services/transfer_service.py
+new file mode 100644
+index 0000000..5155cfd
+--- /dev/null
++++ b/mqi_communicator/src/services/transfer_service.py
+@@ -0,0 +1,72 @@
++from ..infrastructure.executors import IExecutor
++from .interfaces import ITransferService
++
++class TransferError(Exception):
++    """Custom exception for transfer-related errors."""
++    pass
++
++class TransferService(ITransferService):
++    """
++    A service for orchestrating file transfers to and from a remote machine.
++
++    Args:
++        remote_executor (IExecutor): The executor for running commands on the remote host.
++        local_data_path (str): The base path for local case data.
++        remote_workspace (str): The base path for the remote workspace.
++    """
++    def __init__(
++        self,
++        remote_executor: IExecutor,
++        local_data_path: str,
++        remote_workspace: str
++    ):
++        self._executor = remote_executor
++        self._local_path = local_data_path
++        self._remote_path = remote_workspace
++
++    def upload_case(self, case_id: str) -> None:
++        """
++        Uploads a case directory from the local machine to the remote workspace.
++
++        This method first ensures the parent directory exists on the remote,
++        then uses 'scp' to perform a recursive copy.
++
++        Args:
++            case_id (str): The ID of the case to upload.
++
++        Raises:
++            TransferError: If the upload fails.
++        """
++        local_case_path = f"{self._local_path}/{case_id}"
++        remote_case_path = f"{self._remote_path}/{case_id}"
++
++        # Ensure the remote directory exists
++        mkdir_command = f"mkdir -p {self._remote_path}"
++        ret_code, _, stderr = self._executor.execute(mkdir_command)
++        if ret_code != 0:
++            raise TransferError(f"Failed to create remote directory for case {case_id}: {stderr}")
++
++        # Use scp for the transfer
++        scp_command = f"scp -r {local_case_path} {remote_case_path}"
++        ret_code, _, stderr = self._executor.execute(scp_command)
++        if ret_code != 0:
++            raise TransferError(f"Failed to upload case {case_id}: {stderr}")
++
++    def download_results(self, case_id: str) -> None:
++        """
++        Downloads the results for a case from the remote workspace to the local machine.
++
++        Args:
++            case_id (str): The ID of the case whose results are to be downloaded.
++
++        Raises:
++            TransferError: If the download fails.
++        """
++        local_results_path = f"{self._local_path}/{case_id}/results"
++        remote_results_path = f"{self._remote_path}/{case_id}/results"
++
++        # Use scp for the transfer
++        scp_command = f"scp -r {remote_results_path} {local_results_path}"
++        ret_code, _, stderr = self._executor.execute(scp_command)
++        if ret_code != 0:
++            raise TransferError(f"Failed to download results for {case_id}: {stderr}")
+diff --git a/mqi_communicator/tests/e2e/__init__.py b/mqi_communicator/tests/e2e/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/e2e/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/e2e/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..67142b4
+Binary files /dev/null and b/mqi_communicator/tests/e2e/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/e2e/__pycache__/test_workflow.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/e2e/__pycache__/test_workflow.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..8cd8fca
+Binary files /dev/null and b/mqi_communicator/tests/e2e/__pycache__/test_workflow.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/e2e/test_workflow.py b/mqi_communicator/tests/e2e/test_workflow.py
+new file mode 100644
+index 0000000..6915bd2
+--- /dev/null
++++ b/mqi_communicator/tests/e2e/test_workflow.py
+@@ -0,0 +1,66 @@
++import pytest
++import tempfile
++from pathlib import Path
++from unittest.mock import patch
++
++from src.container import Container
++
++class TestE2EWorkflow:
++    @pytest.fixture
++    def temp_dirs(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            base_path = Path(tmpdir)
++            local_data = base_path / "local_data"
++            local_data.mkdir()
++            state_file = base_path / "state.json"
++            yield local_data, state_file
++
++    @pytest.fixture
++    def e2e_container(self, temp_dirs):
++        local_data, state_file = temp_dirs
++        config = {
++            "app": {"state_file": str(state_file)},
++            "ssh": {"host": "localhost", "port": 2222, "username": "test", "pool_size": 1},
++            "paths": {"local_logdata": str(local_data), "remote_workspace": "/remote"},
++            "resources": {"gpu_count": 2}
++        }
++        container = Container()
++        container.config.from_dict(config)
++        return container
++
++    @patch('pynvml.nvmlInit', return_value=None) # Disable real GPU monitoring
++    def test_full_workflow_from_scan_to_schedule(self, mock_nvml, e2e_container, temp_dirs):
++        # Given
++        local_data, _ = temp_dirs
++
++        # Create a new case directory on the "local file system"
++        new_case_id = "case_e2e_001"
++        (local_data / new_case_id).mkdir()
++
++        # Get the orchestrator from the real container
++        orchestrator = e2e_container.workflow_orchestrator()
++
++        # When
++        # Run the main processing step
++        orchestrator.process_new_cases()
++
++        # Then
++        # 1. Verify the case was added to the repository
++        case_repo = e2e_container.case_repo()
++        case = case_repo.get(new_case_id)
++        assert case is not None
++        assert case.case_id == new_case_id
++
++        # 2. Verify that tasks were scheduled
++        scheduler = e2e_container.task_scheduler()
++        # The scheduler's queue should now have tasks for this case
++        next_task = scheduler.get_next_task()
++        assert next_task is not None
++        assert next_task.job_id is not None # A job should have been created
++        assert next_task.type.value == "upload"
++
++        # Verify a job was created
++        job_repo = e2e_container.job_repo()
++        jobs = job_repo.list_all()
++        assert len(jobs) == 1
++        assert jobs[0].case_id == new_case_id
+diff --git a/mqi_communicator/tests/integration/__init__.py b/mqi_communicator/tests/integration/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/integration/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/integration/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..de91e77
+Binary files /dev/null and b/mqi_communicator/tests/integration/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/integration/__pycache__/test_connection_integration.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/integration/__pycache__/test_connection_integration.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..11d3aa1
+Binary files /dev/null and b/mqi_communicator/tests/integration/__pycache__/test_connection_integration.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/integration/__pycache__/test_repository_integration.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/integration/__pycache__/test_repository_integration.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..efb31d1
+Binary files /dev/null and b/mqi_communicator/tests/integration/__pycache__/test_repository_integration.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/integration/__pycache__/test_service_integration.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/integration/__pycache__/test_service_integration.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..da49aa3
+Binary files /dev/null and b/mqi_communicator/tests/integration/__pycache__/test_service_integration.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/integration/test_connection_integration.py b/mqi_communicator/tests/integration/test_connection_integration.py
+new file mode 100644
+index 0000000..6fda4e6
+--- /dev/null
++++ b/mqi_communicator/tests/integration/test_connection_integration.py
+@@ -0,0 +1,20 @@
++import pytest
++import paramiko
++
++from src.infrastructure.connection import SSHConnectionPool, ConnectionError
++
++class TestSSHConnectionPoolIntegration:
++    def test_connection_to_nonexistent_server(self):
++        # Given
++        config = {
++            "host": "localhost",
++            "port": 2223,  # Use a non-standard port to avoid conflicts
++            "username": "test",
++            "password": "test" # Use password auth for simplicity in testing
++        }
++
++        # When / Then
++        # We expect a ConnectionError that wraps a paramiko exception
++        with pytest.raises(ConnectionError, match="Failed to create initial SSH connections"):
++            # This will fail because it can't connect to localhost:2223
++            SSHConnectionPool(config, pool_size=1)
+diff --git a/mqi_communicator/tests/integration/test_repository_integration.py b/mqi_communicator/tests/integration/test_repository_integration.py
+new file mode 100644
+index 0000000..414e49b
+--- /dev/null
++++ b/mqi_communicator/tests/integration/test_repository_integration.py
+@@ -0,0 +1,39 @@
++import pytest
++import tempfile
++from pathlib import Path
++import json
++
++from src.infrastructure.state import StateManager
++from src.infrastructure.repositories import CaseRepository
++from src.domain.models import Case, CaseStatus
++
++class TestRepositoryIntegration:
++    def test_add_case_persists_to_file(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            # Given
++            state_file = Path(tmpdir) / "state.json"
++            state_manager = StateManager(state_path=state_file)
++            repo = CaseRepository(state_manager=state_manager)
++
++            case = Case(case_id="case001", status=CaseStatus.PROCESSING)
++
++            # When
++            repo.add(case)
++
++            # Then
++            # Verify directly by reading the state file
++            assert state_file.exists()
++            with open(state_file, 'r') as f:
++                data = json.load(f)
++
++            assert "cases" in data
++            assert "case001" in data["cases"]
++            assert data["cases"]["case001"]["status"] == "processing"
++
++            # Also verify by reading back through a new repository instance
++            new_state_manager = StateManager(state_path=state_file)
++            new_repo = CaseRepository(state_manager=new_state_manager)
++            retrieved_case = new_repo.get("case001")
++
++            assert retrieved_case is not None
++            assert retrieved_case.status == CaseStatus.PROCESSING
+diff --git a/mqi_communicator/tests/integration/test_service_integration.py b/mqi_communicator/tests/integration/test_service_integration.py
+new file mode 100644
+index 0000000..9120adc
+--- /dev/null
++++ b/mqi_communicator/tests/integration/test_service_integration.py
+@@ -0,0 +1,37 @@
++import pytest
++from unittest.mock import MagicMock
++
++from src.services.resource_service import ResourceService
++from src.services.job_service import JobService
++from src.domain.models import Job
++from src.domain.repositories import IJobRepository
++
++class TestServiceIntegration:
++    def test_job_service_allocates_from_resource_service(self):
++        # Given
++        # We use a real ResourceService
++        resource_service = ResourceService(total_gpus=4)
++
++        # We mock the repository layer, as we're testing service interaction
++        mock_repo = MagicMock(spec=IJobRepository)
++
++        # We use a real JobService
++        job_service = JobService(
++            job_repository=mock_repo,
++            resource_service=resource_service
++        )
++
++        job = Job(job_id="job001", case_id="case001")
++
++        # When
++        # We ask the job service to allocate resources for the job
++        success = job_service.allocate_resources_for_job(job, gpus_required=2)
++
++        # Then
++        assert success is True
++        # Verify that the resource service has fewer GPUs available
++        assert resource_service.get_available_gpu_count() == 2
++        # Verify that the job object was updated correctly
++        assert len(job.gpu_allocation) == 2
++        # Verify that the repository was called to save the updated job
++        mock_repo.update.assert_called_once_with(job)
+diff --git a/mqi_communicator/tests/unit/__init__.py b/mqi_communicator/tests/unit/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/unit/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/unit/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..5c4cffe
+Binary files /dev/null and b/mqi_communicator/tests/unit/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/unit/__pycache__/test_container.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/__pycache__/test_container.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..9ad334f
+Binary files /dev/null and b/mqi_communicator/tests/unit/__pycache__/test_container.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/controllers/__init__.py b/mqi_communicator/tests/unit/controllers/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/unit/controllers/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/unit/controllers/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..8583d84
+Binary files /dev/null and b/mqi_communicator/tests/unit/controllers/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/unit/controllers/__pycache__/test_application.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/controllers/__pycache__/test_application.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..e603285
+Binary files /dev/null and b/mqi_communicator/tests/unit/controllers/__pycache__/test_application.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/controllers/__pycache__/test_lifecycle_manager.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/controllers/__pycache__/test_lifecycle_manager.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..1d67bcd
+Binary files /dev/null and b/mqi_communicator/tests/unit/controllers/__pycache__/test_lifecycle_manager.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/controllers/test_application.py b/mqi_communicator/tests/unit/controllers/test_application.py
+new file mode 100644
+index 0000000..d3ab5ed
+--- /dev/null
++++ b/mqi_communicator/tests/unit/controllers/test_application.py
+@@ -0,0 +1,64 @@
++import pytest
++from unittest.mock import MagicMock, patch
++
++from src.controllers.application import Application
++from src.controllers.interfaces import ILifecycleManager
++from src.domain.interfaces import IWorkflowOrchestrator
++
++class TestApplication:
++    @pytest.fixture
++    def mock_lm(self) -> MagicMock:
++        return MagicMock(spec=ILifecycleManager)
++
++    @pytest.fixture
++    def mock_orchestrator(self) -> MagicMock:
++        return MagicMock(spec=IWorkflowOrchestrator)
++
++    @pytest.fixture
++    def app(self, mock_lm, mock_orchestrator) -> Application:
++        return Application(
++            lifecycle_manager=mock_lm,
++            orchestrator=mock_orchestrator,
++            scan_interval=1 # Use a short interval for testing
++        )
++
++    @patch('time.sleep')
++    def test_start_and_shutdown(self, mock_sleep, app, mock_lm, mock_orchestrator):
++        # Given
++        mock_lm.acquire_lock.return_value = True
++
++        # This is a bit tricky to test the loop. We'll have the orchestrator
++        # stop the app after the first iteration by calling shutdown.
++        def stop_app_on_process():
++            app.shutdown()
++        mock_orchestrator.process_new_cases.side_effect = stop_app_on_process
++
++        # When
++        app.start()
++
++        # Then
++        mock_lm.acquire_lock.assert_called_once()
++        mock_lm.register_shutdown_handler.assert_called_once_with(app.shutdown)
++        mock_orchestrator.process_new_cases.assert_called_once()
++        mock_lm.release_lock.assert_called_once()
++
++    def test_start_fails_if_lock_not_acquired(self, app, mock_lm):
++        # Given
++        mock_lm.acquire_lock.return_value = False
++
++        # When
++        app.start()
++
++        # Then
++        mock_lm.acquire_lock.assert_called_once()
++        mock_lm.register_shutdown_handler.assert_not_called()
++
++    def test_shutdown_is_idempotent(self, app, mock_lm):
++        # Given
++        app._running = False # Pretend it's not running
++
++        # When
++        app.shutdown()
++
++        # Then
++        mock_lm.release_lock.assert_not_called()
+diff --git a/mqi_communicator/tests/unit/controllers/test_lifecycle_manager.py b/mqi_communicator/tests/unit/controllers/test_lifecycle_manager.py
+new file mode 100644
+index 0000000..cfa6352
+--- /dev/null
++++ b/mqi_communicator/tests/unit/controllers/test_lifecycle_manager.py
+@@ -0,0 +1,99 @@
++import pytest
++from unittest.mock import MagicMock, mock_open, patch
++import os
++import signal
++from pathlib import Path
++
++from src.controllers.lifecycle_manager import LifecycleManager
++
++class TestLifecycleManager:
++    @pytest.fixture
++    def pid_file(self) -> Path:
++        return Path("/tmp/test_app.pid")
++
++    @patch('os.open')
++    @patch('os.write')
++    @patch('os.getpid', return_value=12345)
++    def test_acquire_lock_success(self, mock_getpid, mock_write, mock_open, pid_file):
++        # Given
++        lm = LifecycleManager(pid_file)
++
++        # When
++        result = lm.acquire_lock()
++
++        # Then
++        assert result is True
++        mock_open.assert_called_once_with(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++        mock_write.assert_called_once()
++
++    @patch('os.open', side_effect=IOError)
++    def test_acquire_lock_failure(self, mock_open, pid_file):
++        # Given
++        lm = LifecycleManager(pid_file)
++
++        # When
++        result = lm.acquire_lock()
++
++        # Then
++        assert result is False
++
++    @patch('os.close')
++    @patch('pathlib.Path.unlink')
++    def test_release_lock(self, mock_unlink, mock_close, pid_file):
++        # Given
++        lm = LifecycleManager(pid_file)
++        lm._pid_fd = 5 # Dummy file descriptor
++
++        # When
++        lm.release_lock()
++
++        # Then
++        mock_close.assert_called_once_with(5)
++        mock_unlink.assert_called_once()
++
++    @patch('os.open')
++    @patch('os.write')
++    @patch('os.getpid', return_value=12345)
++    @patch('pathlib.Path.exists', return_value=True)
++    @patch('builtins.open', new_callable=mock_open, read_data="54321")
++    @patch('os.kill', side_effect=OSError) # Simulate process not running
++    @patch('pathlib.Path.unlink')
++    def test_acquire_lock_with_stale_pid_file(self, mock_unlink, mock_kill, mock_read_open, mock_path_exists, mock_getpid, mock_write, mock_os_open, pid_file):
++        # Given
++        lm = LifecycleManager(pid_file)
++
++        # When
++        result = lm.acquire_lock()
++
++        # Then
++        assert result is True
++        mock_unlink.assert_called_once()
++        mock_os_open.assert_called_once()
++
++    @patch('signal.signal')
++    def test_register_shutdown_handler(self, mock_signal, pid_file):
++        # Given
++        lm = LifecycleManager(pid_file)
++        mock_handler = MagicMock()
++
++        # When
++        lm.register_shutdown_handler(mock_handler)
++
++        # Then
++        from unittest.mock import ANY
++        # Verify that signal.signal was called for SIGINT and SIGTERM
++        mock_signal.assert_any_call(signal.SIGINT, ANY)
++        mock_signal.assert_any_call(signal.SIGTERM, ANY)
++
++        # Find the actual handler function that was registered
++        sigint_handler = None
++        for call in mock_signal.call_args_list:
++            if call.args[0] == signal.SIGINT:
++                sigint_handler = call.args[1]
++                break
++
++        assert sigint_handler is not None
++
++        # Call the registered handler and verify our mock was called
++        sigint_handler(signal.SIGINT, None)
++        mock_handler.assert_called_once()
+diff --git a/mqi_communicator/tests/unit/domain/__init__.py b/mqi_communicator/tests/unit/domain/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/unit/domain/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/unit/domain/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..2587d0f
+Binary files /dev/null and b/mqi_communicator/tests/unit/domain/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/unit/domain/__pycache__/test_models.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/domain/__pycache__/test_models.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..1209183
+Binary files /dev/null and b/mqi_communicator/tests/unit/domain/__pycache__/test_models.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/domain/__pycache__/test_system_monitor.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/domain/__pycache__/test_system_monitor.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..48e8304
+Binary files /dev/null and b/mqi_communicator/tests/unit/domain/__pycache__/test_system_monitor.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/domain/__pycache__/test_task_scheduler.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/domain/__pycache__/test_task_scheduler.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..9013f2c
+Binary files /dev/null and b/mqi_communicator/tests/unit/domain/__pycache__/test_task_scheduler.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/domain/__pycache__/test_workflow_orchestrator.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/domain/__pycache__/test_workflow_orchestrator.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..e3f7058
+Binary files /dev/null and b/mqi_communicator/tests/unit/domain/__pycache__/test_workflow_orchestrator.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/domain/test_models.py b/mqi_communicator/tests/unit/domain/test_models.py
+new file mode 100644
+index 0000000..9a12de2
+--- /dev/null
++++ b/mqi_communicator/tests/unit/domain/test_models.py
+@@ -0,0 +1,57 @@
++import pytest
++from datetime import datetime
++from src.domain.models import Case, Job, Task, CaseStatus, JobStatus, TaskType
++
++class TestDomainModels:
++    def test_case_creation(self):
++        # Given
++        case_id = "case_001"
++
++        # When
++        case = Case(case_id=case_id, beam_count=10)
++
++        # Then
++        assert case.case_id == case_id
++        assert case.beam_count == 10
++        assert case.status == CaseStatus.NEW
++        assert isinstance(case.created_at, datetime)
++        assert isinstance(case.updated_at, datetime)
++        assert case.metadata == {}
++
++    def test_job_creation(self):
++        # Given
++        job_id = "job_001"
++        case_id = "case_001"
++
++        # When
++        job = Job(job_id=job_id, case_id=case_id, priority=5)
++
++        # Then
++        assert job.job_id == job_id
++        assert job.case_id == case_id
++        assert job.priority == 5
++        assert job.status == JobStatus.PENDING
++        assert job.gpu_allocation == []
++        assert job.started_at is None
++        assert job.completed_at is None
++
++    def test_task_creation(self):
++        # Given
++        task_id = "task_001"
++        job_id = "job_001"
++
++        # When
++        task = Task(task_id=task_id, job_id=job_id, type=TaskType.UPLOAD)
++
++        # Then
++        assert task.task_id == task_id
++        assert task.job_id == job_id
++        assert task.type == TaskType.UPLOAD
++        assert task.parameters == {}
++        assert task.status == "pending"
++
++    def test_enum_values(self):
++        # Just to be sure the string values are correct
++        assert CaseStatus.COMPLETED.value == "completed"
++        assert JobStatus.RUNNING.value == "running"
++        assert TaskType.BEAM_CALC.value == "beam_calc"
+diff --git a/mqi_communicator/tests/unit/domain/test_system_monitor.py b/mqi_communicator/tests/unit/domain/test_system_monitor.py
+new file mode 100644
+index 0000000..4d07c71
+--- /dev/null
++++ b/mqi_communicator/tests/unit/domain/test_system_monitor.py
+@@ -0,0 +1,72 @@
++import pytest
++from unittest.mock import MagicMock, patch
++
++from src.domain.interfaces import GPUStatus, DiskUsage
++
++from src.domain.system_monitor import SystemMonitor
++
++class TestSystemMonitor:
++    @pytest.fixture
++    def monitor(self) -> SystemMonitor:
++        return SystemMonitor()
++
++    @patch('psutil.cpu_percent')
++    def test_get_cpu_usage(self, mock_cpu_percent, monitor):
++        # Given
++        mock_cpu_percent.return_value = 75.5
++
++        # When
++        usage = monitor.get_cpu_usage()
++
++        # Then
++        assert usage == 75.5
++        mock_cpu_percent.assert_called_once_with(interval=1)
++
++    @patch('psutil.disk_usage')
++    def test_get_disk_usage(self, mock_disk_usage, monitor):
++        # Given
++        mock_disk_usage.return_value = MagicMock(total=1000, used=250, free=750, percent=25.0)
++
++        # When
++        usage = monitor.get_disk_usage("/dummy")
++
++        # Then
++        assert usage.total == 1000
++        assert usage.percent == 25.0
++        mock_disk_usage.assert_called_once_with("/dummy")
++
++    @patch('pynvml.nvmlDeviceGetUtilizationRates')
++    @patch('pynvml.nvmlDeviceGetMemoryInfo')
++    @patch('pynvml.nvmlDeviceGetName')
++    @patch('pynvml.nvmlDeviceGetHandleByIndex')
++    @patch('pynvml.nvmlDeviceGetCount')
++    @patch('pynvml.nvmlInit')
++    def test_get_gpu_status(self, mock_init, mock_count, mock_handle, mock_name, mock_mem, mock_util):
++        # Given
++        mock_count.return_value = 2
++        mock_handle.side_effect = ["handle1", "handle2"]
++        mock_name.side_effect = [b"NVIDIA A5000", b"NVIDIA A5000"]
++        mock_mem.side_effect = [MagicMock(total=24576, used=1024), MagicMock(total=24576, used=2048)]
++        mock_util.side_effect = [MagicMock(gpu=50), MagicMock(gpu=75)]
++
++        monitor = SystemMonitor()
++
++        # When
++        status = monitor.get_gpu_status()
++
++        # Then
++        assert len(status) == 2
++        assert status[0].name == "NVIDIA A5000"
++        assert status[1].id == 1
++        assert status[1].utilization == 75
++        mock_init.assert_called_once()
++
++    @patch('pynvml.nvmlInit', side_effect=__import__('pynvml').NVMLError(1))
++    def test_gpu_monitoring_disabled_if_nvml_fails(self, mock_init):
++        # When
++        monitor = SystemMonitor() # Re-initialize to trigger the error
++        status = monitor.get_gpu_status()
++
++        # Then
++        assert monitor._nvml_initialized is False
++        assert status == []
+diff --git a/mqi_communicator/tests/unit/domain/test_task_scheduler.py b/mqi_communicator/tests/unit/domain/test_task_scheduler.py
+new file mode 100644
+index 0000000..4833141
+--- /dev/null
++++ b/mqi_communicator/tests/unit/domain/test_task_scheduler.py
+@@ -0,0 +1,60 @@
++import pytest
++from unittest.mock import MagicMock
++from collections import deque
++from typing import Optional, Deque
++
++from src.domain.models import Task, TaskType, Case, Job
++from src.services.interfaces import ICaseService, IJobService
++
++from src.domain.task_scheduler import TaskScheduler
++
++class TestTaskScheduler:
++    @pytest.fixture
++    def mock_case_service(self) -> MagicMock:
++        return MagicMock(spec=ICaseService)
++
++    @pytest.fixture
++    def mock_job_service(self) -> MagicMock:
++        return MagicMock(spec=IJobService)
++
++    @pytest.fixture
++    def scheduler(self, mock_case_service, mock_job_service) -> TaskScheduler:
++        return TaskScheduler(case_service=mock_case_service, job_service=mock_job_service)
++
++    def test_schedule_case_creates_tasks(self, scheduler, mock_case_service, mock_job_service):
++        # Given
++        case = Case(case_id="case001")
++        job = Job(job_id="job001", case_id="case001")
++        mock_case_service.get_case.return_value = case
++        mock_job_service.create_job.return_value = job
++
++        # When
++        scheduler.schedule_case("case001")
++
++        # Then
++        assert len(scheduler._task_queue) == 5
++        # Check that the first task is the upload task
++        assert scheduler._task_queue[0].type == TaskType.UPLOAD
++        assert scheduler._task_queue[0].job_id == "job001"
++
++    def test_get_next_task(self, scheduler, mock_case_service, mock_job_service):
++        # Given
++        self.test_schedule_case_creates_tasks(scheduler, mock_case_service, mock_job_service)
++
++        # When
++        task1 = scheduler.get_next_task()
++        task2 = scheduler.get_next_task()
++
++        # Then
++        assert task1 is not None
++        assert task1.type == TaskType.UPLOAD
++        assert task2 is not None
++        assert task2.type == TaskType.INTERPRET
++        assert len(scheduler._task_queue) == 3
++
++    def test_get_next_task_from_empty_queue(self, scheduler):
++        # When
++        task = scheduler.get_next_task()
++
++        # Then
++        assert task is None
+diff --git a/mqi_communicator/tests/unit/domain/test_workflow_orchestrator.py b/mqi_communicator/tests/unit/domain/test_workflow_orchestrator.py
+new file mode 100644
+index 0000000..85dd8b1
+--- /dev/null
++++ b/mqi_communicator/tests/unit/domain/test_workflow_orchestrator.py
+@@ -0,0 +1,47 @@
++import pytest
++from unittest.mock import MagicMock
++
++from src.services.interfaces import ICaseService
++from src.domain.interfaces import ITaskScheduler
++
++from src.domain.workflow_orchestrator import WorkflowOrchestrator
++
++class TestWorkflowOrchestrator:
++    @pytest.fixture
++    def mock_case_service(self) -> MagicMock:
++        return MagicMock(spec=ICaseService)
++
++    @pytest.fixture
++    def mock_task_scheduler(self) -> MagicMock:
++        return MagicMock(spec=ITaskScheduler)
++
++    @pytest.fixture
++    def orchestrator(self, mock_case_service, mock_task_scheduler) -> WorkflowOrchestrator:
++        return WorkflowOrchestrator(
++            case_service=mock_case_service,
++            task_scheduler=mock_task_scheduler
++        )
++
++    def test_process_new_cases_schedules_found_cases(self, orchestrator, mock_case_service, mock_task_scheduler):
++        # Given
++        mock_case_service.scan_for_new_cases.return_value = ["case1", "case2"]
++
++        # When
++        orchestrator.process_new_cases()
++
++        # Then
++        mock_case_service.scan_for_new_cases.assert_called_once()
++        assert mock_task_scheduler.schedule_case.call_count == 2
++        mock_task_scheduler.schedule_case.assert_any_call("case1")
++        mock_task_scheduler.schedule_case.assert_any_call("case2")
++
++    def test_process_new_cases_does_nothing_when_none_found(self, orchestrator, mock_case_service, mock_task_scheduler):
++        # Given
++        mock_case_service.scan_for_new_cases.return_value = []
++
++        # When
++        orchestrator.process_new_cases()
++
++        # Then
++        mock_case_service.scan_for_new_cases.assert_called_once()
++        mock_task_scheduler.schedule_case.assert_not_called()
+diff --git a/mqi_communicator/tests/unit/infrastructure/__init__.py b/mqi_communicator/tests/unit/infrastructure/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..373b5fb
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/test_config_manager.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_config_manager.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..f22fcc7
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_config_manager.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/test_connection.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_connection.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..9475cea
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_connection.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/test_executors.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_executors.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..0a394cb
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_executors.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/test_repositories.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_repositories.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..b985b46
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_repositories.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/test_resilience.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_resilience.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..0157a15
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_resilience.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/__pycache__/test_state_manager.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_state_manager.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..abb505b
+Binary files /dev/null and b/mqi_communicator/tests/unit/infrastructure/__pycache__/test_state_manager.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/infrastructure/test_config_manager.py b/mqi_communicator/tests/unit/infrastructure/test_config_manager.py
+new file mode 100644
+index 0000000..8fe6fc6
+--- /dev/null
++++ b/mqi_communicator/tests/unit/infrastructure/test_config_manager.py
+@@ -0,0 +1,89 @@
++import pytest
++import yaml
++from pathlib import Path
++from unittest.mock import mock_open, patch
++
++from src.infrastructure.config import ConfigManager, ConfigurationError
++
++# Tests
++class TestConfigManager:
++    @pytest.fixture
++    def valid_config_data(self):
++        return {"app": {"name": "MQI Communicator", "version": "2.0.0"}}
++
++    @pytest.fixture
++    def valid_config_yaml(self, valid_config_data):
++        return yaml.dump(valid_config_data)
++
++    def test_load_valid_config(self, valid_config_yaml):
++        # Given
++        mock_file = mock_open(read_data=valid_config_yaml)
++        with patch("pathlib.Path.is_file", return_value=True), \
++             patch("builtins.open", mock_file):
++
++            # When
++            manager = ConfigManager(Path("dummy/path/config.yaml"))
++
++            # Then
++            assert manager.get("app")["name"] == "MQI Communicator"
++            assert manager.get("app")["version"] == "2.0.0"
++
++    def test_config_file_not_found(self):
++        # Given
++        with patch("pathlib.Path.is_file", return_value=False):
++
++            # When / Then
++            with pytest.raises(ConfigurationError, match="Configuration file not found"):
++                ConfigManager(Path("non/existent/path/config.yaml"))
++
++    def test_invalid_yaml_format(self):
++        # Given
++        invalid_yaml = "app: name: MQI\n  version: 2.0" # incorrect indentation
++        mock_file = mock_open(read_data=invalid_yaml)
++
++        with patch("pathlib.Path.is_file", return_value=True), \
++             patch("builtins.open", mock_file):
++
++            # When / Then
++            with pytest.raises(ConfigurationError, match="Error parsing YAML file"):
++                ConfigManager(Path("dummy/path/config.yaml"))
++
++    def test_get_value(self, valid_config_yaml):
++        # Given
++        mock_file = mock_open(read_data=valid_config_yaml)
++        with patch("pathlib.Path.is_file", return_value=True), \
++             patch("builtins.open", mock_file):
++            manager = ConfigManager(Path("dummy/path/config.yaml"))
++
++            # When
++            app_config = manager.get("app")
++
++            # Then
++            assert app_config is not None
++            assert app_config["name"] == "MQI Communicator"
++
++    def test_get_non_existent_key(self, valid_config_yaml):
++        # Given
++        mock_file = mock_open(read_data=valid_config_yaml)
++        with patch("pathlib.Path.is_file", return_value=True), \
++             patch("builtins.open", mock_file):
++            manager = ConfigManager(Path("dummy/path/config.yaml"))
++
++            # When
++            result = manager.get("non_existent_key")
++
++            # Then
++            assert result is None
++
++    def test_get_with_default_value(self, valid_config_yaml):
++        # Given
++        mock_file = mock_open(read_data=valid_config_yaml)
++        with patch("pathlib.Path.is_file", return_value=True), \
++             patch("builtins.open", mock_file):
++            manager = ConfigManager(Path("dummy/path/config.yaml"))
++
++            # When
++            result = manager.get("non_existent_key", "default_value")
++
++            # Then
++            assert result == "default_value"
+diff --git a/mqi_communicator/tests/unit/infrastructure/test_connection.py b/mqi_communicator/tests/unit/infrastructure/test_connection.py
+new file mode 100644
+index 0000000..2d55847
+--- /dev/null
++++ b/mqi_communicator/tests/unit/infrastructure/test_connection.py
+@@ -0,0 +1,91 @@
++import pytest
++from unittest.mock import MagicMock, patch, ANY
++import queue
++import paramiko
++
++from src.infrastructure.connection import SSHConnectionPool, ConnectionError
++
++class TestSSHConnectionPool:
++    @pytest.fixture
++    def mock_config(self):
++        return {
++            "host": "localhost",
++            "port": 2222,
++            "username": "test",
++            "key_file": "/path/to/key"
++        }
++
++    @pytest.fixture
++    def mock_ssh_client(self):
++        with patch('paramiko.SSHClient') as mock_ssh_client_class:
++
++            def create_mock_instance(*args, **kwargs):
++                instance = MagicMock()
++                transport = MagicMock()
++                transport.is_active.return_value = True
++                instance.get_transport.return_value = transport
++                return instance
++
++            mock_ssh_client_class.side_effect = create_mock_instance
++            yield mock_ssh_client_class
++
++    def test_pool_initialization(self, mock_config, mock_ssh_client):
++        # When
++        pool = SSHConnectionPool(mock_config, pool_size=3)
++
++        # Then
++        assert pool._pool.qsize() == 3
++        assert mock_ssh_client.call_count == 3
++
++    def test_get_and_return_connection(self, mock_config, mock_ssh_client):
++        # Given
++        pool = SSHConnectionPool(mock_config, pool_size=1)
++        initial_qsize = pool._pool.qsize()
++
++        # When
++        with pool.connection_context() as conn:
++            # Then
++            assert conn is not None
++            assert pool._pool.empty()
++
++        assert pool._pool.qsize() == initial_qsize
++
++    def test_get_connection_timeout(self, mock_config, mock_ssh_client):
++        # Given
++        pool = SSHConnectionPool(mock_config, pool_size=1)
++        conn = pool.get_connection()
++
++        # When / Then
++        with pytest.raises(ConnectionError, match="Timeout waiting for an SSH connection"):
++            pool.get_connection(timeout=0.1)
++
++        # Cleanup
++        pool.release_connection(conn)
++
++    def test_broken_connection_is_replaced(self, mock_config, mock_ssh_client):
++        # Given
++        pool = SSHConnectionPool(mock_config, pool_size=1)
++
++        # Simulate a broken connection
++        broken_conn = pool.get_connection()
++        broken_conn.get_transport().is_active.return_value = False
++
++        # When
++        pool.release_connection(broken_conn)
++
++        # Then
++        # The pool should have created a new connection to replace the broken one.
++        assert pool._pool.qsize() == 1
++        # The original connect call + the new one
++        assert mock_ssh_client.call_count == 2
++
++        # The new connection should be healthy
++        new_conn = pool.get_connection()
++        assert new_conn.get_transport().is_active() is True
++
++    def test_initialization_failure(self, mock_config):
++        # Given
++        with patch('paramiko.SSHClient.connect', side_effect=paramiko.SSHException("Auth failed")):
++            # When / Then
++            with pytest.raises(ConnectionError, match="Failed to create initial SSH connections"):
++                SSHConnectionPool(mock_config, pool_size=2)
+diff --git a/mqi_communicator/tests/unit/infrastructure/test_executors.py b/mqi_communicator/tests/unit/infrastructure/test_executors.py
+new file mode 100644
+index 0000000..b1a9eb3
+--- /dev/null
++++ b/mqi_communicator/tests/unit/infrastructure/test_executors.py
+@@ -0,0 +1,81 @@
++import pytest
++import subprocess
++from typing import Tuple
++
++from src.infrastructure.executors import LocalExecutor, RemoteExecutor
++from unittest.mock import MagicMock
++
++class TestRemoteExecutor:
++    @pytest.fixture
++    def mock_pool(self):
++        return MagicMock()
++
++    @pytest.fixture
++    def mock_ssh_connection(self):
++        conn = MagicMock()
++        stdout_mock = MagicMock()
++        stdout_mock.channel.recv_exit_status.return_value = 0
++        stdout_mock.read.return_value = b"remote output"
++
++        stderr_mock = MagicMock()
++        stderr_mock.read.return_value = b"remote error"
++
++        conn.exec_command.return_value = (MagicMock(), stdout_mock, stderr_mock)
++        return conn
++
++    def test_execute_success(self, mock_pool, mock_ssh_connection):
++        # Given
++        mock_pool.connection_context.return_value.__enter__.return_value = mock_ssh_connection
++        executor = RemoteExecutor(mock_pool)
++        command = "ls -l"
++
++        # When
++        return_code, stdout, stderr = executor.execute(command)
++
++        # Then
++        assert return_code == 0
++        assert stdout == "remote output"
++        assert stderr == "remote error"
++        mock_pool.connection_context.assert_called_once()
++        mock_ssh_connection.exec_command.assert_called_once_with(command)
++
++class TestLocalExecutor:
++    def test_execute_success(self):
++        # Given
++        executor = LocalExecutor()
++        command = "echo 'hello world'"
++
++        # When
++        return_code, stdout, stderr = executor.execute(command)
++
++        # Then
++        assert return_code == 0
++        assert stdout.strip() == "hello world"
++        assert stderr == ""
++
++    def test_execute_failure(self):
++        # Given
++        executor = LocalExecutor()
++        # Use a command that is guaranteed to fail and produce stderr
++        command = "ls /non_existent_directory_12345"
++
++        # When
++        return_code, stdout, stderr = executor.execute(command)
++
++        # Then
++        assert return_code != 0
++        assert stdout == ""
++        assert "No such file or directory" in stderr
++
++    def test_execute_with_complex_command(self):
++        # Given
++        executor = LocalExecutor()
++        command = "echo 'line1' && echo 'line2' >&2"
++
++        # When
++        return_code, stdout, stderr = executor.execute(command)
++
++        # Then
++        assert return_code == 0
++        assert stdout.strip() == "line1"
++        assert stderr.strip() == "line2"
+diff --git a/mqi_communicator/tests/unit/infrastructure/test_repositories.py b/mqi_communicator/tests/unit/infrastructure/test_repositories.py
+new file mode 100644
+index 0000000..bd0e447
+--- /dev/null
++++ b/mqi_communicator/tests/unit/infrastructure/test_repositories.py
+@@ -0,0 +1,139 @@
++import pytest
++from unittest.mock import MagicMock
++from typing import Dict, Any, Optional, List
++
++from src.domain.models import Case, Job, CaseStatus, JobStatus
++from src.infrastructure.repositories import CaseRepository, JobRepository
++
++
++class TestJobRepository:
++    @pytest.fixture
++    def mock_state_manager(self):
++        # A simple in-memory mock for the state manager
++        mock = MagicMock()
++        state: Dict[str, Any] = {}
++
++        def get_side_effect(key, default=None):
++            keys = key.split('.')
++            value = state
++            for k in keys:
++                if isinstance(value, dict):
++                    value = value.get(k)
++                else:
++                    return default
++            return value if value is not None else default
++
++        def set_side_effect(key, value):
++            keys = key.split('.')
++            current = state
++            for k in keys[:-1]:
++                current = current.setdefault(k, {})
++            current[keys[-1]] = value
++
++        mock.get.side_effect = get_side_effect
++        mock.set.side_effect = set_side_effect
++        mock.transaction.return_value.__enter__.return_value = None
++
++        return mock
++
++    @pytest.fixture
++    def sample_job(self) -> Job:
++        return Job(job_id="job001", case_id="case001", status=JobStatus.PENDING)
++
++    def test_add_and_get_job(self, mock_state_manager, sample_job):
++        # Given
++        repo = JobRepository(mock_state_manager)
++
++        # When
++        repo.add(sample_job)
++        retrieved_job = repo.get(sample_job.job_id)
++
++        # Then
++        assert retrieved_job is not None
++        assert retrieved_job.job_id == sample_job.job_id
++        assert retrieved_job.status == sample_job.status
++
++class TestCareRepository:
++    @pytest.fixture
++    def mock_state_manager(self):
++        # A simple in-memory mock for the state manager
++        mock = MagicMock()
++        state: Dict[str, Any] = {}
++
++        def get_side_effect(key, default=None):
++            keys = key.split('.')
++            value = state
++            for k in keys:
++                if isinstance(value, dict):
++                    value = value.get(k)
++                else:
++                    return default
++            return value if value is not None else default
++
++        def set_side_effect(key, value):
++            keys = key.split('.')
++            current = state
++            for k in keys[:-1]:
++                current = current.setdefault(k, {})
++            current[keys[-1]] = value
++
++        mock.get.side_effect = get_side_effect
++        mock.set.side_effect = set_side_effect
++        mock.transaction.return_value.__enter__.return_value = None
++
++        return mock
++
++    @pytest.fixture
++    def sample_case(self) -> Case:
++        return Case(case_id="case001", status=CaseStatus.NEW)
++
++    def test_add_and_get_case(self, mock_state_manager, sample_case):
++        # Given
++        repo = CaseRepository(mock_state_manager)
++
++        # When
++        repo.add(sample_case)
++        retrieved_case = repo.get(sample_case.case_id)
++
++        # Then
++        assert retrieved_case is not None
++        assert retrieved_case.case_id == sample_case.case_id
++        assert retrieved_case.status == sample_case.status
++
++    def test_get_nonexistent_case(self, mock_state_manager):
++        # Given
++        repo = CaseRepository(mock_state_manager)
++
++        # When
++        retrieved_case = repo.get("nonexistent_id")
++
++        # Then
++        assert retrieved_case is None
++
++    def test_list_all_cases(self, mock_state_manager, sample_case):
++        # Given
++        repo = CaseRepository(mock_state_manager)
++        case2 = Case(case_id="case002")
++        repo.add(sample_case)
++        repo.add(case2)
++
++        # When
++        all_cases = repo.list_all()
++
++        # Then
++        assert len(all_cases) == 2
++        assert {c.case_id for c in all_cases} == {"case001", "case002"}
++
++    def test_update_case(self, mock_state_manager, sample_case):
++        # Given
++        repo = CaseRepository(mock_state_manager)
++        repo.add(sample_case)
++
++        # When
++        sample_case.status = CaseStatus.PROCESSING
++        repo.update(sample_case)
++        retrieved_case = repo.get(sample_case.case_id)
++
++        # Then
++        assert retrieved_case is not None
++        assert retrieved_case.status == CaseStatus.PROCESSING
+diff --git a/mqi_communicator/tests/unit/infrastructure/test_resilience.py b/mqi_communicator/tests/unit/infrastructure/test_resilience.py
+new file mode 100644
+index 0000000..b6c56c0
+--- /dev/null
++++ b/mqi_communicator/tests/unit/infrastructure/test_resilience.py
+@@ -0,0 +1,151 @@
++import pytest
++import time
++from dataclasses import dataclass
++from unittest.mock import MagicMock
++
++from src.infrastructure.resilience import (
++    RetryPolicy,
++    retry_on_exception,
++    CircuitBreaker,
++    CircuitState,
++    CircuitBreakerError
++)
++import time
++
++class TestCircuitBreaker:
++    def test_starts_in_closed_state(self):
++        cb = CircuitBreaker()
++        assert cb.state == CircuitState.CLOSED
++
++    def test_opens_after_threshold_failures(self):
++        cb = CircuitBreaker(failure_threshold=2)
++        mock_func = MagicMock(side_effect=ValueError)
++
++        @cb
++        def decorated_func():
++            mock_func()
++
++        with pytest.raises(ValueError):
++            decorated_func()
++        with pytest.raises(ValueError):
++            decorated_func()
++
++        assert cb.state == CircuitState.OPEN
++
++        with pytest.raises(CircuitBreakerError):
++            decorated_func()
++
++    def test_half_open_after_timeout(self):
++        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.1)
++        mock_func = MagicMock(side_effect=ValueError)
++
++        @cb
++        def decorated_func():
++            mock_func()
++
++        with pytest.raises(ValueError):
++            decorated_func()
++
++        assert cb.state == CircuitState.OPEN
++
++        time.sleep(0.11)
++
++        # It should now be half-open, so it will try the call again
++        with pytest.raises(ValueError):
++            decorated_func()
++
++        assert cb.state == CircuitState.OPEN # It failed again, so it re-opens
++
++    def test_closes_after_success_in_half_open(self):
++        cb = CircuitBreaker(failure_threshold=1, recovery_timeout=0.1)
++        mock_func = MagicMock(side_effect=[ValueError, "Success"])
++
++        @cb
++        def decorated_func():
++            return mock_func()
++
++        with pytest.raises(ValueError):
++            decorated_func()
++
++        time.sleep(0.11)
++
++        # First call in half-open state will succeed
++        result = decorated_func()
++
++        assert result == "Success"
++        assert cb.state == CircuitState.CLOSED
++
++class TestRetryPolicy:
++    def test_success_on_first_try(self):
++        # Given
++        mock_func = MagicMock()
++        mock_func.return_value = "success"
++        policy = RetryPolicy()
++
++        @retry_on_exception(policy)
++        def decorated_func():
++            return mock_func()
++
++        # When
++        result = decorated_func()
++
++        # Then
++        assert result == "success"
++        mock_func.assert_called_once()
++
++    def test_success_after_one_failure(self):
++        # Given
++        mock_func = MagicMock()
++        mock_func.side_effect = [ValueError("Fail"), "success"]
++        policy = RetryPolicy(base_delay=0.01) # Use small delay for testing
++
++        @retry_on_exception(policy, exception_type=ValueError)
++        def decorated_func():
++            return mock_func()
++
++        # When
++        result = decorated_func()
++
++        # Then
++        assert result == "success"
++        assert mock_func.call_count == 2
++
++    def test_failure_after_max_attempts(self):
++        # Given
++        mock_func = MagicMock(side_effect=IOError("Persistent failure"))
++        policy = RetryPolicy(max_attempts=3, base_delay=0.01)
++
++        @retry_on_exception(policy, exception_type=IOError)
++        def decorated_func():
++            return mock_func()
++
++        # When / Then
++        with pytest.raises(IOError):
++            decorated_func()
++
++        assert mock_func.call_count == 3
++
++    def test_exponential_backoff_delay(self, monkeypatch):
++        # Given
++        mock_sleep = MagicMock()
++        monkeypatch.setattr(time, "sleep", mock_sleep)
++
++        mock_func = MagicMock(side_effect=RuntimeError("Failure"))
++        policy = RetryPolicy(max_attempts=4, base_delay=0.1, exponential_base=2)
++
++        @retry_on_exception(policy, exception_type=RuntimeError)
++        def decorated_func():
++            return mock_func()
++
++        # When
++        with pytest.raises(RuntimeError):
++            decorated_func()
++
++        # Then
++        assert mock_sleep.call_count == 3
++        # 1st retry delay: 0.1 * (2**0) = 0.1
++        assert mock_sleep.call_args_list[0].args[0] == pytest.approx(0.1)
++        # 2nd retry delay: 0.1 * (2**1) = 0.2
++        assert mock_sleep.call_args_list[1].args[0] == pytest.approx(0.2)
++        # 3rd retry delay: 0.1 * (2**2) = 0.4
++        assert mock_sleep.call_args_list[2].args[0] == pytest.approx(0.4)
+diff --git a/mqi_communicator/tests/unit/infrastructure/test_state_manager.py b/mqi_communicator/tests/unit/infrastructure/test_state_manager.py
+new file mode 100644
+index 0000000..23f1cbd
+--- /dev/null
++++ b/mqi_communicator/tests/unit/infrastructure/test_state_manager.py
+@@ -0,0 +1,106 @@
++import pytest
++import json
++from pathlib import Path
++from unittest.mock import mock_open, patch, call
++from threading import Thread
++
++from src.infrastructure.state import StateManager, StateManagerError
++
++class TestStateManager:
++    @pytest.fixture
++    def state_file(self):
++        # Use a real path in a temp directory to test file operations
++        return Path("/tmp/test_state.json")
++
++    @pytest.fixture
++    def initial_state(self):
++        return {"cases": {"case1": {"status": "NEW"}}, "jobs": {}}
++
++    @pytest.fixture
++    def initial_state_json(self, initial_state):
++        return json.dumps(initial_state)
++
++    def test_initialization_with_existing_state(self, state_file, initial_state_json):
++        m = mock_open(read_data=initial_state_json)
++        with patch("pathlib.Path.exists", return_value=True), patch("builtins.open", m):
++            sm = StateManager(state_file)
++            assert sm.get("cases.case1.status") == "NEW"
++
++    def test_initialization_with_no_state_file(self, state_file):
++        with patch("pathlib.Path.exists", return_value=False):
++            sm = StateManager(state_file)
++            assert sm.get("cases") is None
++
++    def test_set_and_get_value(self, state_file):
++        m = mock_open()
++        with patch("pathlib.Path.exists", return_value=False), \
++             patch("builtins.open", m), \
++             patch("pathlib.Path.rename"): # Mock rename to avoid file system errors
++            sm = StateManager(state_file)
++            sm.set("jobs.job1.status", "QUEUED")
++            assert sm.get("jobs.job1.status") == "QUEUED"
++            # Check if save was called via atomic write pattern
++            m.assert_called_with(state_file.with_suffix('.tmp'), 'w')
++
++
++    def test_transaction_commit(self, state_file, initial_state, initial_state_json):
++        m = mock_open(read_data=initial_state_json)
++        with patch("pathlib.Path.exists", return_value=True), \
++             patch("builtins.open", m), \
++             patch("pathlib.Path.rename") as mock_rename:
++            sm = StateManager(state_file)
++            m.reset_mock() # Reset mock after initialization
++
++            # Act
++            with sm.transaction():
++                sm.set("cases.case1.status", "PROCESSING")
++                sm.set("jobs.job1", {"status": "RUNNING"})
++
++            # Assert
++            # State should be updated after commit
++            assert sm.get("cases.case1.status") == "PROCESSING"
++            assert sm.get("jobs.job1.status") == "RUNNING"
++
++            # Ensure save was called once on commit
++            m.assert_called_once_with(state_file.with_suffix('.tmp'), 'w')
++            mock_rename.assert_called_once_with(state_file)
++
++    def test_transaction_rollback_on_exception(self, state_file, initial_state, initial_state_json):
++        m = mock_open(read_data=initial_state_json)
++        with patch("pathlib.Path.exists", return_value=True), \
++             patch("builtins.open", m), \
++             patch("pathlib.Path.rename"):
++            sm = StateManager(state_file)
++
++            original_status = sm.get("cases.case1.status")
++
++            with pytest.raises(ValueError):
++                with sm.transaction():
++                    sm.set("cases.case1.status", "FAILED")
++                    raise ValueError("Something went wrong")
++
++            # State should be rolled back
++            assert sm.get("cases.case1.status") == original_status
++            assert sm.get("cases.case1.status") == "NEW"
++
++    def test_get_inside_transaction(self, state_file, initial_state_json):
++        m = mock_open(read_data=initial_state_json)
++        with patch("pathlib.Path.exists", return_value=True), \
++             patch("builtins.open", m), \
++             patch("pathlib.Path.rename"):
++            sm = StateManager(state_file)
++
++            with sm.transaction():
++                sm.set("new_key", "temp_value")
++                assert sm.get("new_key") == "temp_value"
++
++            # Value is persisted after transaction
++            assert sm.get("new_key") == "temp_value"
++
++    def test_nested_transaction_raises_error(self, state_file):
++        with patch("pathlib.Path.exists", return_value=False):
++            sm = StateManager(state_file)
++            with pytest.raises(StateManagerError, match="A transaction is already in progress"):
++                with sm.transaction():
++                    with sm.transaction():
++                        pass
+diff --git a/mqi_communicator/tests/unit/services/__init__.py b/mqi_communicator/tests/unit/services/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/mqi_communicator/tests/unit/services/__pycache__/__init__.cpython-312.pyc b/mqi_communicator/tests/unit/services/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..ef81930
+Binary files /dev/null and b/mqi_communicator/tests/unit/services/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/mqi_communicator/tests/unit/services/__pycache__/test_case_service.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/services/__pycache__/test_case_service.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..c003b52
+Binary files /dev/null and b/mqi_communicator/tests/unit/services/__pycache__/test_case_service.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/services/__pycache__/test_job_service.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/services/__pycache__/test_job_service.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..7be0fa5
+Binary files /dev/null and b/mqi_communicator/tests/unit/services/__pycache__/test_job_service.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/services/__pycache__/test_resource_service.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/services/__pycache__/test_resource_service.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..fbf4b53
+Binary files /dev/null and b/mqi_communicator/tests/unit/services/__pycache__/test_resource_service.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/services/__pycache__/test_transfer_service.cpython-312-pytest-8.4.1.pyc b/mqi_communicator/tests/unit/services/__pycache__/test_transfer_service.cpython-312-pytest-8.4.1.pyc
+new file mode 100644
+index 0000000..a09cba4
+Binary files /dev/null and b/mqi_communicator/tests/unit/services/__pycache__/test_transfer_service.cpython-312-pytest-8.4.1.pyc differ
+diff --git a/mqi_communicator/tests/unit/services/test_case_service.py b/mqi_communicator/tests/unit/services/test_case_service.py
+new file mode 100644
+index 0000000..36aa2ed
+--- /dev/null
++++ b/mqi_communicator/tests/unit/services/test_case_service.py
+@@ -0,0 +1,69 @@
++import pytest
++from unittest.mock import MagicMock
++from typing import List, Optional
++
++from src.domain.models import Case, CaseStatus
++from src.domain.repositories import ICaseRepository
++from src.services.interfaces import IFileSystem
++
++from src.services.case_service import CaseService
++
++class TestCareService:
++    @pytest.fixture
++    def mock_repo(self) -> MagicMock:
++        return MagicMock(spec=ICaseRepository)
++
++    @pytest.fixture
++    def mock_fs(self) -> MagicMock:
++        return MagicMock(spec=IFileSystem)
++
++    @pytest.fixture
++    def case_service(self, mock_repo, mock_fs) -> CaseService:
++        return CaseService(
++            case_repository=mock_repo,
++            file_system=mock_fs,
++            scan_path="/data/new_cases"
++        )
++
++    def test_scan_finds_new_cases(self, case_service, mock_repo, mock_fs):
++        # Given
++        mock_fs.list_directories.return_value = ["case1", "case2", "case3"]
++        mock_repo.list_all.return_value = [Case(case_id="case1")]
++
++        # When
++        new_cases = case_service.scan_for_new_cases()
++
++        # Then
++        assert set(new_cases) == {"case2", "case3"}
++        # Check that add was called for each new case
++        assert mock_repo.add.call_count == 2
++        # Verify the case_ids of the added cases
++        added_cases = {call.args[0].case_id for call in mock_repo.add.call_args_list}
++        assert added_cases == {"case2", "case3"}
++
++    def test_scan_finds_no_new_cases(self, case_service, mock_repo, mock_fs):
++        # Given
++        mock_fs.list_directories.return_value = ["case1"]
++        mock_repo.list_all.return_value = [Case(case_id="case1")]
++
++        # When
++        new_cases = case_service.scan_for_new_cases()
++
++        # Then
++        assert len(new_cases) == 0
++        mock_repo.add.assert_not_called()
++
++    def test_update_case_status(self, case_service, mock_repo):
++        # Given
++        case = Case(case_id="case1")
++        mock_repo.get.return_value = case
++
++        # When
++        case_service.update_case_status("case1", CaseStatus.PROCESSING)
++
++        # Then
++        mock_repo.get.assert_called_once_with("case1")
++        # The case object's status should be updated
++        assert case.status == CaseStatus.PROCESSING
++        # And the repository's update method should be called with the modified object
++        mock_repo.update.assert_called_once_with(case)
+diff --git a/mqi_communicator/tests/unit/services/test_job_service.py b/mqi_communicator/tests/unit/services/test_job_service.py
+new file mode 100644
+index 0000000..012957e
+--- /dev/null
++++ b/mqi_communicator/tests/unit/services/test_job_service.py
+@@ -0,0 +1,75 @@
++import pytest
++from unittest.mock import MagicMock
++import uuid
++
++from src.domain.models import Job, JobStatus
++from src.domain.repositories import IJobRepository
++from src.services.interfaces import IResourceService
++
++from src.services.job_service import JobService
++
++class TestJobService:
++    @pytest.fixture
++    def mock_repo(self) -> MagicMock:
++        return MagicMock(spec=IJobRepository)
++
++    @pytest.fixture
++    def mock_resource_service(self) -> MagicMock:
++        return MagicMock(spec=IResourceService)
++
++    @pytest.fixture
++    def job_service(self, mock_repo, mock_resource_service) -> JobService:
++        return JobService(job_repository=mock_repo, resource_service=mock_resource_service)
++
++    def test_create_job(self, job_service, mock_repo):
++        # Given
++        case_id = "case001"
++
++        # When
++        job = job_service.create_job(case_id)
++
++        # Then
++        assert job.case_id == case_id
++        assert job.status == JobStatus.PENDING
++        mock_repo.add.assert_called_once_with(job)
++
++    def test_allocate_resources_success(self, job_service, mock_resource_service, mock_repo):
++        # Given
++        job = Job(job_id="job001", case_id="case001")
++        mock_resource_service.allocate_gpus.return_value = [1] # Success
++
++        # When
++        result = job_service.allocate_resources_for_job(job)
++
++        # Then
++        assert result is True
++        assert job.gpu_allocation == [1]
++        assert job.status == JobStatus.RUNNING
++        mock_repo.update.assert_called_once_with(job)
++
++    def test_allocate_resources_failure(self, job_service, mock_resource_service, mock_repo):
++        # Given
++        job = Job(job_id="job001", case_id="case001")
++        mock_resource_service.allocate_gpus.return_value = None # Failure
++
++        # When
++        result = job_service.allocate_resources_for_job(job)
++
++        # Then
++        assert result is False
++        assert job.gpu_allocation == []
++        assert job.status == JobStatus.PENDING # Status should not change
++        mock_repo.update.assert_not_called()
++
++    def test_complete_job(self, job_service, mock_resource_service, mock_repo):
++        # Given
++        job = Job(job_id="job001", case_id="case001", gpu_allocation=[1])
++        mock_repo.get.return_value = job
++
++        # When
++        job_service.complete_job("job001")
++
++        # Then
++        mock_resource_service.release_gpus.assert_called_once_with([1])
++        assert job.status == JobStatus.COMPLETED
++        mock_repo.update.assert_called_once_with(job)
+diff --git a/mqi_communicator/tests/unit/services/test_resource_service.py b/mqi_communicator/tests/unit/services/test_resource_service.py
+new file mode 100644
+index 0000000..52c57fd
+--- /dev/null
++++ b/mqi_communicator/tests/unit/services/test_resource_service.py
+@@ -0,0 +1,90 @@
++import pytest
++from typing import List, Optional, Set
++from threading import Thread
++
++from src.services.resource_service import ResourceService
++
++class TestResourceService:
++    @pytest.fixture
++    def resource_service(self) -> ResourceService:
++        return ResourceService(total_gpus=4)
++
++    def test_initial_available_gpus(self, resource_service):
++        assert resource_service.get_available_gpu_count() == 4
++
++    def test_allocate_gpus_success(self, resource_service):
++        # When
++        allocated = resource_service.allocate_gpus(2)
++
++        # Then
++        assert allocated is not None
++        assert len(allocated) == 2
++        assert resource_service.get_available_gpu_count() == 2
++
++    def test_allocate_more_gpus_than_available(self, resource_service):
++        # When
++        allocated = resource_service.allocate_gpus(5)
++
++        # Then
++        assert allocated is None
++        assert resource_service.get_available_gpu_count() == 4
++
++    def test_release_gpus(self, resource_service):
++        # Given
++        allocated = resource_service.allocate_gpus(3)
++        assert resource_service.get_available_gpu_count() == 1
++
++        # When
++        resource_service.release_gpus(allocated)
++
++        # Then
++        assert resource_service.get_available_gpu_count() == 4
++
++    def test_allocate_all_gpus(self, resource_service):
++        # When
++        allocated1 = resource_service.allocate_gpus(2)
++        allocated2 = resource_service.allocate_gpus(2)
++
++        # Then
++        assert allocated1 is not None
++        assert allocated2 is not None
++        assert resource_service.get_available_gpu_count() == 0
++
++        # And a subsequent allocation should fail
++        assert resource_service.allocate_gpus(1) is None
++
++    def test_releasing_unallocated_gpus_is_harmless(self, resource_service):
++        # Given
++        initial_count = resource_service.get_available_gpu_count()
++
++        # When
++        resource_service.release_gpus([10, 11]) # These were never allocated
++
++        # Then
++        # The available count should not change, and no error should be raised.
++        # The internal state of _available_gpus might grow, which is acceptable.
++        assert resource_service.get_available_gpu_count() >= initial_count
++
++    def test_thread_safety(self):
++        # Given
++        total_gpus = 50
++        service = ResourceService(total_gpus=total_gpus)
++        allocations = []
++
++        def worker():
++            allocated = service.allocate_gpus(1)
++            if allocated:
++                allocations.extend(allocated)
++
++        # When
++        threads = [Thread(target=worker) for _ in range(total_gpus * 2)]
++        for t in threads:
++            t.start()
++        for t in threads:
++            t.join()
++
++        # Then
++        # All GPUs should be allocated
++        assert service.get_available_gpu_count() == 0
++        # The total number of unique allocated GPUs should be correct
++        assert len(set(allocations)) == total_gpus
+diff --git a/mqi_communicator/tests/unit/services/test_transfer_service.py b/mqi_communicator/tests/unit/services/test_transfer_service.py
+new file mode 100644
+index 0000000..48d4815
+--- /dev/null
++++ b/mqi_communicator/tests/unit/services/test_transfer_service.py
+@@ -0,0 +1,62 @@
++import pytest
++from unittest.mock import MagicMock
++
++from src.infrastructure.executors import IExecutor
++
++from src.services.transfer_service import TransferService, TransferError
++
++class TestTransferService:
++    @pytest.fixture
++    def mock_executor(self) -> MagicMock:
++        return MagicMock(spec=IExecutor)
++
++    @pytest.fixture
++    def transfer_service(self, mock_executor) -> TransferService:
++        return TransferService(
++            remote_executor=mock_executor,
++            local_data_path="/local/data",
++            remote_workspace="/remote/workspace"
++        )
++
++    def test_upload_case_success(self, transfer_service, mock_executor):
++        # Given
++        mock_executor.execute.return_value = (0, "success", "") # Success
++        case_id = "case001"
++
++        # When
++        transfer_service.upload_case(case_id)
++
++        # Then
++        assert mock_executor.execute.call_count == 2
++        mock_executor.execute.assert_any_call("mkdir -p /remote/workspace")
++        mock_executor.execute.assert_any_call("scp -r /local/data/case001 /remote/workspace/case001")
++
++    def test_upload_case_failure(self, transfer_service, mock_executor):
++        # Given
++        mock_executor.execute.return_value = (1, "", "Permission denied") # Failure
++        case_id = "case001"
++
++        # When / Then
++        with pytest.raises(TransferError, match="Failed to create remote directory for case case001: Permission denied"):
++            transfer_service.upload_case(case_id)
++
++    def test_download_results_success(self, transfer_service, mock_executor):
++        # Given
++        mock_executor.execute.return_value = (0, "success", "") # Success
++        case_id = "case001"
++
++        # When
++        transfer_service.download_results(case_id)
++
++        # Then
++        expected_command = "scp -r /remote/workspace/case001/results /local/data/case001/results"
++        mock_executor.execute.assert_called_once_with(expected_command)
++
++    def test_download_results_failure(self, transfer_service, mock_executor):
++        # Given
++        mock_executor.execute.return_value = (1, "", "No such file") # Failure
++        case_id = "case001"
++
++        # When / Then
++        with pytest.raises(TransferError, match="Failed to download results for case001: No such file"):
++            transfer_service.download_results(case_id)
+diff --git a/mqi_communicator/tests/unit/test_container.py b/mqi_communicator/tests/unit/test_container.py
+new file mode 100644
+index 0000000..98b6b99
+--- /dev/null
++++ b/mqi_communicator/tests/unit/test_container.py
+@@ -0,0 +1,46 @@
++import pytest
++from unittest.mock import patch
++
++from src.container import Container
++
++class TestContainer:
++    @pytest.fixture
++    def sample_config(self):
++        return {
++            "app": {
++                "state_file": "/tmp/test_state.json"
++            },
++            "ssh": {
++                "host": "localhost",
++                "port": 2222,
++                "username": "test",
++                "key_file": "/path/to/key",
++                "pool_size": 2
++            },
++            "paths": {
++                "local_logdata": "/local/data",
++                "remote_workspace": "/remote/workspace"
++            },
++            "resources": {
++                "gpu_count": 4
++            }
++        }
++
++    @patch('pynvml.nvmlInit', return_value=None) # Prevent NVML init during test
++    def test_container_wiring_and_resolution(self, mock_nvml, sample_config):
++        # Given
++        container = Container()
++        container.config.from_dict(sample_config)
++
++        # When
++        container.wire(modules=[__name__]) # Wire to the current module
++
++        # Then
++        orchestrator = container.workflow_orchestrator()
++
++        assert orchestrator is not None
++        assert orchestrator._case_service is not None
++        assert orchestrator._task_scheduler is not None
++
++        # Clean up
++        container.unwire()

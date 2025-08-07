@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "mqi-communicator"
+version = "2.0.0"
+description = "A system to automate medical physics QA workflows."
+authors = ["Jules <agent@anthropic.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.0"
+black = "^23.0"
+flake8 = "^6.0"
+mypy = "^1.0"
+pre-commit = "^3.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true

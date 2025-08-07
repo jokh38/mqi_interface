@@ -1,0 +1,21 @@
+app:
+  state_file: "/tmp/mqi_state.json"
+  log_file: "/tmp/mqi.log"
+  pid_file: "/tmp/mqi.pid"
+
+ssh:
+  host: "your_hpc_host"
+  port: 22
+  username: "your_username"
+  key_file: "~/.ssh/id_rsa"
+  pool_size: 5
+
+paths:
+  local_logdata: "/path/to/your/local/data"
+  remote_workspace: "/path/to/your/remote/workspace"
+
+resources:
+  gpu_count: 6
+
+processing:
+  scan_interval_seconds: 60
